@@ -61,14 +61,10 @@ mkdir -p tmp
 sudo bin/gulp -i enp111s0 -r 100 -C 1 -o tmp/ -n my_filename -t
 ```
 
-
-
-
 ## Runing without root
-Currently not possible (see https://github.com/jmakov/gulp/issues/1)
 ```
 sudo groupadd pcap
 sudo usermod -a -G pcap $USER
 sudo chgrp pcap gulp
-sudo setcap cap_net_raw,cap_net_admin=eip gulp
+sudo setcap cap_ipc_lock,cap_sys_nice,cap_net_raw,cap_net_admin=eip bin/gulp
 ```
