@@ -486,8 +486,7 @@ child_cleanup(int signo)
   wait(NULL);
 }
 
-void process_savefile(char filename[PATH_MAX])
-    {
+void process_savefile(char filename[PATH_MAX]) {
     if (fork())
 	return;
     /* set to lowest priority */
@@ -497,12 +496,13 @@ void process_savefile(char filename[PATH_MAX])
     setpriority(PRIO_PROCESS, 0, 19);
 #endif
     if (zflag) {
-        if (execlp(zcmd, zcmd, filename, (char *)NULL) == -1) {
-	    fprintf(stderr, "compress_savefile: execlp(%s, %s): %s\n", zcmd,
-		filename, strerror(errno));
+        if(strlen(filename) > 0) {
+            if (execlp(zcmd, zcmd, filename, (char *)NULL) == -1) {
+                fprintf(stderr, "compress_savefile: execlp(%s, %s): %s\n", zcmd, filename, strerror(errno));
+            }
 	    }
 	}
-    }
+}
 
 /*
  * Redirect standard output into a new capture file in the specified directory.
@@ -513,8 +513,7 @@ void process_savefile(char filename[PATH_MAX])
  * access and subsequently renaming them to names unlikely to cause trouble.
  */
 
-int
-newoutfile(char *dir, int num) {
+int newoutfile(char *dir, int num) {
     char tfile[PATH_MAX];		/* output temp filename */
     char ofile[PATH_MAX];		/* output real filename */
     if (access(dir, W_OK) != 0) {
