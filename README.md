@@ -33,3 +33,11 @@ Usage: ./gulp [--help | options]
       -B        check if select(2) would ever have blocked on write
       -Y        avoid writes which would block
 ```
+
+## Runing without root
+```
+sudo groupadd pcap
+sudo usermod -a -G pcap $USER
+sudo chgrp pcap gulp
+sudo setcap cap_net_raw,cap_net_admin=eip gulp
+```
