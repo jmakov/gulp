@@ -1,0 +1,256 @@
+<HTML><BODY BGCOLOR=ffffff TEXT=000000><PRE>
+GULP(1)                          User Commands                         GULP(1)
+
+
+
+<B><FONT COLOR=#0000ff>NAME</B></FONT>
+       gulp - drink efficiently from the network firehose
+
+<B><FONT COLOR=#0000ff>SYNOPSIS</B></FONT>
+       <B><FONT COLOR=#0000ff>gulp</B></FONT> [<B><FONT COLOR=#0000ff>--help</B></FONT> | <B><FONT COLOR=#ff0000>OPTIONS</B></FONT>]
+
+<B><FONT COLOR=#0000ff>DESCRIPTION</B></FONT>
+       On  a system with at least two CPUs (or cores), <B><FONT COLOR=#0000ff>Gulp</B></FONT> will probably drop
+       far fewer packets than <B><FONT COLOR=#0000ff>tcpdump</B></FONT> when capturing from ethernet and writing
+       to  disk,  allowing for much higher packet capture rates.  <B><FONT COLOR=#0000ff>Gulp</B></FONT> has the
+       ability to read directly from the network but even piping  output  from
+       legacy  applications  through <B><FONT COLOR=#0000ff>gulp</B></FONT> before writing to disk will probably
+       result in a substantial performance improvement.
+
+       Since <B><FONT COLOR=#0000ff>Gulp</B></FONT> uses CPUs #0-1, if you use <B><FONT COLOR=#0000ff>Gulp</B></FONT> in a pipeline and have  more
+       than  2 CPUs, you can further improve performance by explicitly running
+       other programs on CPUs #2-N with <B><FONT COLOR=#0000ff>taskset</B></FONT>(1) as shown in  some  examples
+       below.
+
+       To  improve  interactive  response at low packet rates, <B><FONT COLOR=#0000ff>Gulp</B></FONT> will flush
+       its ring buffer if it has not written anything in the last second.   If
+       the  data  rate  increases,  Gulp will realign its writes to even block
+       boundaries for optimum writing efficiency.
+
+       When <B><FONT COLOR=#0000ff>Gulp</B></FONT> receives an interrupt, it will stop filling its  ring  buffer
+       but will not exit until it has finished writing whatever remains in the
+       ring buffer.  If the buffer is large this can take a while--be patient.
+
+<B><FONT COLOR=#0000ff>OPTIONS</B></FONT>
+       <B><FONT COLOR=#0000ff>-d</B></FONT>     Decapsulates  packets  from  a  Cisco  "Encapsulated Remote SPAN
+              Port" (ERSPAN).  Sets the pcap filter expression to "proto  gre"
+              and  strips  off  Cisco  GRE headers (50 bytes) from the packets
+              captured.  (If used with "-f" note that arguments are  processed
+              left to right).
+
+       <B><FONT COLOR=#0000ff>-f</B></FONT>     Specify  a pcap filter expression.  This may be useful to select
+              one from many GRE streams (if using <B><FONT COLOR=#0000ff>-d</B></FONT>), or  if  not  using  <B><FONT COLOR=#0000ff>-d</B></FONT>,
+              because  filtering  out  packets in the kernel is more efficient
+              than passing them first through <B><FONT COLOR=#0000ff>Gulp</B></FONT>  and  then  filtering  them
+              out.
+
+       <B><FONT COLOR=#0000ff>-i</B></FONT> <B><FONT COLOR=#ff0000>eth#</B></FONT>
+              Specify the network interface to read from.  The default is <B><FONT COLOR=#0000ff>eth1</B></FONT>
+              or the value of environment  variable  $CAP_IFACE,  if  present.
+              Specifying "<B><FONT COLOR=#0000ff>-</B></FONT>" as an "interface" reads a pcap file from standard
+              input instead.  (If you forget -d during a live capture, you can
+              decapsulate offline this way).
+
+       <B><FONT COLOR=#0000ff>-r</B></FONT> <B><FONT COLOR=#ff0000>#</B></FONT>   Specify  a  ring buffer size (in megabytes).  Values from 1-1024
+              are permitted, the default is 100MB.  If possible, the ring buf-
+              fer will be locked into RAM.
+
+       <B><FONT COLOR=#0000ff>-c</B></FONT>     Just  copy  and  buffer bytes from stdin to stdout -- don't read
+              packets from the network and don't  assume  anything  about  the
+              format of the data.  This may be useful to improve the real-time
+              performance of another application.
+
+       <B><FONT COLOR=#0000ff>-s</B></FONT> <B><FONT COLOR=#ff0000>#</B></FONT>   Packet capture snapshot length.  By  default,  complete  packets
+              are captured.  For efficiency, captured packets can be truncated
+              to a given length during the capture process, which reduces cap-
+              ture  overhead  and pcap file sizes.  (If used with "-d", speci-
+              fies length after decapsulation.)
+
+       <B><FONT COLOR=#0000ff>-F</B></FONT>     Skip  default  check  that  the capture interface is an Ethernet
+              interface.
+
+       <B><FONT COLOR=#0000ff>-x</B></FONT>     Use file locking to request (via exclusive lock)  that  this  be
+              the  only  instance  of  <B><FONT COLOR=#0000ff>Gulp</B></FONT>  running.   If other instances are
+              already running, they must be stopped  before  Gulp  will  start
+              with this option.
+
+       <B><FONT COLOR=#0000ff>-X</B></FONT>     Override  an exclusive lock (above) and run anyway.  An instance
+              of <B><FONT COLOR=#0000ff>Gulp</B></FONT> started this way will hold a shared lock if no exclusive
+              locks were broken, otherwise it will hold no locks at all (caus-
+              ing a subsequent attempt to get an exclusive lock to succeed).
+
+       <B><FONT COLOR=#0000ff>-v</B></FONT>     Print program version and exit.
+
+       <B><FONT COLOR=#0000ff>-V</B></FONT> <B><FONT COLOR=#0000ff>xxxxxxxxxx</B></FONT>
+              If the string of Xs is wide enough (10  or  more),  it  will  be
+              overwritten  twice per second with a brief capture status update
+              consisting of one digit followed by two percentages.  The  digit
+              is  the  number  of  decimal  digits in the actual count of lost
+              packets (0 indicates no drops).  The  two  percentages  are  the
+              current  and maximum ring buffer utilization.  The updated argu-
+              ment string can be seen with the  "<B><FONT COLOR=#0000ff>ps</B></FONT> <B><FONT COLOR=#0000ff>-x</B></FONT>"  command  (or  equiva-
+              lent).
+
+              If  the string of Xs is too short to hold the information above,
+              a more verbose status line is written to standard error  instead
+              (also  twice/second).   The first method is probably more useful
+              to occasionally check on long captures and the  second  will  be
+              more convenient while experimenting and setting up a capture.
+
+       <B><FONT COLOR=#0000ff>-p</B></FONT> <B><FONT COLOR=#ff0000>#</B></FONT>   Specify  the  thread  polling  interval  (in microseconds).  The
+              reader/writer threads poll at this interval when the ring buffer
+              is  full/empty  waiting  for that to change.  Polling (even fre-
+              quently) on modern hardware consumes immeasurably few resources.
+              The default interval is 1000 (microseconds).
+
+       <B><FONT COLOR=#0000ff>-q</B></FONT>     Suppress  warnings  about the ring buffer being full.  (If input
+              is not from a live capture, no data will be lost when  the  ring
+              buffer fills so the warning can be safely suppressed.  (If stdin
+              is actually a file, warning suppression  will  happen  automati-
+              cally.)
+
+       <B><FONT COLOR=#0000ff>-z</B></FONT> <B><FONT COLOR=#ff0000>#</B></FONT>   Specify  output  write blocksize.  Any power of two between 4096
+              and 65536 will probably be OK.  It seems  to  be  slightly  more
+              efficient  to  write  larger  blocks so the default is 65536 for
+              now.
+
+<B><FONT COLOR=#0000ff>CAPTURE</B></FONT> <B><FONT COLOR=#0000ff>TO</B></FONT> <B><FONT COLOR=#0000ff>FILE</B></FONT> <B><FONT COLOR=#0000ff>OPTIONS</B></FONT>
+       <B><FONT COLOR=#0000ff>-o</B></FONT> <B><FONT COLOR=#ff0000>dir</B></FONT> Redirects pcap output into a collection of  files  in  directory
+              <B><FONT COLOR=#ff0000>dir</B></FONT>.   Pcap files will be named <B><FONT COLOR=#0000ff>pcap</B></FONT><B><FONT COLOR=#ff0000>###</B></FONT> (where <B><FONT COLOR=#ff0000>###</B></FONT> starts at 000
+              and counts up).  To prevent mischief, the directory  must  exist
+              (and  be  writable  by  the user running Gulp if Gulp is running
+              setuid).
+
+       <B><FONT COLOR=#0000ff>-n</B></FONT> <B><FONT COLOR=#ff0000>name</B></FONT>
+              Specify a filename prefix of <B><FONT COLOR=#ff0000>name</B></FONT> instead of the default <B><FONT COLOR=#0000ff>pcap</B></FONT>.
+
+       <B><FONT COLOR=#0000ff>-t</B></FONT>     When set, the current timestamp will  be  appended  after  <B><FONT COLOR=#ff0000>name</B></FONT>.
+              This  option  implicitely  sets  <B><FONT COLOR=#0000ff>-z</B></FONT> <B><FONT COLOR=#0000ff>1000</B></FONT> (and so always produces
+              filenames like <B><FONT COLOR=#ff0000>name</B></FONT>1234567890.<B><FONT COLOR=#ff0000>###</B></FONT>).
+
+       <B><FONT COLOR=#0000ff>-C</B></FONT> <B><FONT COLOR=#ff0000>#</B></FONT>   When using the -o option above, start a new pcap file  when  the
+              old  one reaches about # times the size of the ring buffer.  The
+              default value is 10 and the default ring buffer size is 100MB so
+              by  default,  pcap  files will grow to about 1000MB before a new
+              one is started.  Since some programs read an  entire  pcap  file
+              into  memory when using it, splitting the output into chunks can
+              be helpful.
+
+       <B><FONT COLOR=#0000ff>-G</B></FONT> <B><FONT COLOR=#ff0000>#</B></FONT>   If set, specifies the maximum delay (in seconds) after  which  a
+              new output file is created (same behavior as the equivalent <B><FONT COLOR=#0000ff>tcp-</B></FONT>
+              <B><FONT COLOR=#0000ff>dump</B></FONT> option).
+
+       <B><FONT COLOR=#0000ff>-W</B></FONT> <B><FONT COLOR=#ff0000>#</B></FONT>   Specifies a maximum number of pcap files to create before  over-
+              writing  them.   The  default  is to never overwrite them.  This
+              option allows capturing indefinitely (waiting for a  problem  to
+              occur) with finite disk space.
+
+       <B><FONT COLOR=#0000ff>-Z</B></FONT> <B><FONT COLOR=#ff0000>postrotate-command</B></FONT>
+              If  set,  specifies  a command to post-process each capture file
+              after they got rotated.
+
+<B><FONT COLOR=#0000ff>OTHER</B></FONT> <B><FONT COLOR=#0000ff>OPTIONS</B></FONT>
+       <B><FONT COLOR=#0000ff>-B</B></FONT>     This  option  is  of academic interest only.  It enables code to
+              check before each write whether select(2) thinks the write would
+              block.   When  <B><FONT COLOR=#0000ff>Gulp</B></FONT> exits, it announces whether any writes would
+              have blocked.  On linux, no matter how long writes to disk actu-
+              ally  take,  select(2)  never says they will block.  If you pipe
+              the output of <B><FONT COLOR=#0000ff>Gulp</B></FONT> through cat before writing  to  disk,  select
+              <B><FONT COLOR=#ff0000>will</B></FONT> detect writes to the pipe would block.
+
+       <B><FONT COLOR=#0000ff>-Y</B></FONT>     This  option  is  of academic interest only.  Writes which would
+              block are deferred until select(2) says they won't block.
+
+<B><FONT COLOR=#0000ff>EXAMPLES</B></FONT>
+       In the examples below, the ellipsis (<B><FONT COLOR=#ff0000>...</B></FONT>)  refers  to  Berkeley  Packet
+       Filter (pcap) expressions, such as "<B><FONT COLOR=#0000ff>host</B></FONT> <B><FONT COLOR=#0000ff>foo".</B></FONT>
+
+       1) reduce packet loss of a tcpdump packet capture:
+          (gulp -c works in any pipeline as it does no data interpretation)
+
+            <B><FONT COLOR=#0000ff>tcpdump</B></FONT> <B><FONT COLOR=#0000ff>-i</B></FONT> <B><FONT COLOR=#ff0000>eth1</B></FONT> <B><FONT COLOR=#0000ff>-w</B></FONT> <B><FONT COLOR=#0000ff>-</B></FONT> <B><FONT COLOR=#ff0000>...</B></FONT> <B><FONT COLOR=#0000ff>|</B></FONT> <B><FONT COLOR=#0000ff>gulp</B></FONT> <B><FONT COLOR=#0000ff>-c</B></FONT> <B><FONT COLOR=#0000ff>&gt;</B></FONT> <B><FONT COLOR=#ff0000>pcapfile</B></FONT>
+          or if you have more than 2, run tcpdump and gulp on different CPUs
+            <B><FONT COLOR=#0000ff>taskset</B></FONT> <B><FONT COLOR=#0000ff>-c</B></FONT> <B><FONT COLOR=#0000ff>2</B></FONT> <B><FONT COLOR=#0000ff>tcpdump</B></FONT> <B><FONT COLOR=#0000ff>-i</B></FONT> <B><FONT COLOR=#ff0000>eth1</B></FONT> <B><FONT COLOR=#0000ff>-w</B></FONT> <B><FONT COLOR=#0000ff>-</B></FONT> <B><FONT COLOR=#ff0000>...</B></FONT> <B><FONT COLOR=#0000ff>|</B></FONT> <B><FONT COLOR=#0000ff>gulp</B></FONT> <B><FONT COLOR=#0000ff>-c</B></FONT> <B><FONT COLOR=#0000ff>&gt;</B></FONT> <B><FONT COLOR=#ff0000>pcapfile</B></FONT>
+
+          (gulp uses CPUs #0,1 so use #2 for tcpdump to reduce interference)
+
+       2) same as above but more efficiently using gulp itself to capture:
+
+            <B><FONT COLOR=#0000ff>gulp</B></FONT> <B><FONT COLOR=#0000ff>-i</B></FONT> <B><FONT COLOR=#ff0000>eth1</B></FONT> <B><FONT COLOR=#0000ff>-f</B></FONT> <B><FONT COLOR=#0000ff>"</B></FONT><B><FONT COLOR=#ff0000>...</B></FONT><B><FONT COLOR=#0000ff>"</B></FONT> <B><FONT COLOR=#0000ff>&gt;</B></FONT> <B><FONT COLOR=#ff0000>pcapfile</B></FONT>
+
+       3) capture and decapsulate an ERSPAN feed and save the result to disk:
+
+            <B><FONT COLOR=#0000ff>gulp</B></FONT> <B><FONT COLOR=#0000ff>-i</B></FONT> <B><FONT COLOR=#ff0000>eth1</B></FONT> <B><FONT COLOR=#0000ff>-d</B></FONT> <B><FONT COLOR=#0000ff>&gt;</B></FONT> <B><FONT COLOR=#ff0000>pcapfile</B></FONT>
+
+       4) capture, decapsulate and then filter with tcpdump before saving:
+
+            <B><FONT COLOR=#0000ff>gulp</B></FONT> <B><FONT COLOR=#0000ff>-i</B></FONT> <B><FONT COLOR=#ff0000>eth1</B></FONT> <B><FONT COLOR=#0000ff>-d</B></FONT> <B><FONT COLOR=#0000ff>|</B></FONT> <B><FONT COLOR=#0000ff>tcpdump</B></FONT> <B><FONT COLOR=#0000ff>-r</B></FONT> <B><FONT COLOR=#0000ff>-</B></FONT> <B><FONT COLOR=#0000ff>-s0</B></FONT> <B><FONT COLOR=#0000ff>-w</B></FONT> <B><FONT COLOR=#ff0000>pcapfile</B></FONT> <B><FONT COLOR=#ff0000>...</B></FONT>
+          or if you have more than 2 CPUs
+            <B><FONT COLOR=#0000ff>gulp</B></FONT> <B><FONT COLOR=#0000ff>-i</B></FONT> <B><FONT COLOR=#ff0000>eth1</B></FONT> <B><FONT COLOR=#0000ff>-d</B></FONT> <B><FONT COLOR=#0000ff>|</B></FONT> <B><FONT COLOR=#0000ff>taskset</B></FONT> <B><FONT COLOR=#0000ff>-c</B></FONT> <B><FONT COLOR=#0000ff>2</B></FONT> <B><FONT COLOR=#0000ff>tcpdump</B></FONT> <B><FONT COLOR=#0000ff>-r</B></FONT> <B><FONT COLOR=#0000ff>-</B></FONT> <B><FONT COLOR=#0000ff>-s0</B></FONT> <B><FONT COLOR=#0000ff>-w</B></FONT> <B><FONT COLOR=#ff0000>pcapfile</B></FONT> <B><FONT COLOR=#ff0000>...</B></FONT>
+
+       5) capture everything to disk; then decapsulate offline:
+
+            <B><FONT COLOR=#0000ff>gulp</B></FONT> <B><FONT COLOR=#0000ff>-i</B></FONT> <B><FONT COLOR=#ff0000>eth1</B></FONT> <B><FONT COLOR=#0000ff>&gt;</B></FONT> <B><FONT COLOR=#ff0000>pcapfile1</B></FONT><B><FONT COLOR=#0000ff>;</B></FONT> <B><FONT COLOR=#0000ff>gulp</B></FONT> <B><FONT COLOR=#0000ff>-d</B></FONT> <B><FONT COLOR=#0000ff>-i</B></FONT> <B><FONT COLOR=#0000ff>-</B></FONT> <B><FONT COLOR=#0000ff>&lt;</B></FONT> <B><FONT COLOR=#ff0000>pcapfile1</B></FONT> <B><FONT COLOR=#0000ff>&gt;</B></FONT> <B><FONT COLOR=#ff0000>pcapfile2</B></FONT>
+
+       6) capture, decapsulate and then filter with ngrep:
+
+            <B><FONT COLOR=#0000ff>gulp</B></FONT> <B><FONT COLOR=#0000ff>-i</B></FONT> <B><FONT COLOR=#ff0000>eth1</B></FONT> <B><FONT COLOR=#0000ff>-d</B></FONT> <B><FONT COLOR=#0000ff>|</B></FONT> <B><FONT COLOR=#0000ff>ngrep</B></FONT> <B><FONT COLOR=#0000ff>-I</B></FONT> <B><FONT COLOR=#0000ff>-</B></FONT> <B><FONT COLOR=#0000ff>-O</B></FONT> <B><FONT COLOR=#ff0000>pcapfile</B></FONT> <B><FONT COLOR=#ff0000>regex</B></FONT> <B><FONT COLOR=#ff0000>...</B></FONT>
+
+       7) capture, decapsulate and feed into ntop:
+
+            <B><FONT COLOR=#0000ff>gulp</B></FONT> <B><FONT COLOR=#0000ff>-i</B></FONT> <B><FONT COLOR=#ff0000>eth1</B></FONT> <B><FONT COLOR=#0000ff>-d</B></FONT> <B><FONT COLOR=#0000ff>|</B></FONT> <B><FONT COLOR=#0000ff>ntop</B></FONT> <B><FONT COLOR=#0000ff>-f</B></FONT> <B><FONT COLOR=#0000ff>/dev/stdin</B></FONT> <B><FONT COLOR=#0000ff>-m</B></FONT> <B><FONT COLOR=#ff0000>a.b.c.d/x</B></FONT> <B><FONT COLOR=#0000ff>...</B></FONT>
+          or if using ntop's -u flag:
+            <B><FONT COLOR=#0000ff>mkfifo</B></FONT> <B><FONT COLOR=#ff0000>pipe</B></FONT><B><FONT COLOR=#0000ff>;</B></FONT> <B><FONT COLOR=#0000ff>chmod</B></FONT> <B><FONT COLOR=#0000ff>644</B></FONT> <B><FONT COLOR=#ff0000>pipe</B></FONT>   # the first time only
+            <B><FONT COLOR=#0000ff>gulp</B></FONT> <B><FONT COLOR=#0000ff>-i</B></FONT> <B><FONT COLOR=#ff0000>eth1</B></FONT> <B><FONT COLOR=#0000ff>-d</B></FONT> <B><FONT COLOR=#0000ff>&gt;</B></FONT> <B><FONT COLOR=#ff0000>pipe</B></FONT> <B><FONT COLOR=#0000ff>&amp;</B></FONT> <B><FONT COLOR=#0000ff>ntop</B></FONT> <B><FONT COLOR=#0000ff>-u</B></FONT> <B><FONT COLOR=#ff0000>ntop</B></FONT> <B><FONT COLOR=#0000ff>-f</B></FONT> <B><FONT COLOR=#ff0000>pipe</B></FONT> <B><FONT COLOR=#0000ff>-m</B></FONT> <B><FONT COLOR=#ff0000>a.b.c.d/x</B></FONT> <B><FONT COLOR=#0000ff>...</B></FONT>
+
+       8) capture, decapsulate and feed into WireShark:
+
+            <B><FONT COLOR=#0000ff>gulp</B></FONT> <B><FONT COLOR=#0000ff>-i</B></FONT> <B><FONT COLOR=#ff0000>eth1</B></FONT> <B><FONT COLOR=#0000ff>-d</B></FONT> <B><FONT COLOR=#0000ff>|</B></FONT> <B><FONT COLOR=#0000ff>/usr/sbin/wireshark</B></FONT> <B><FONT COLOR=#0000ff>-i</B></FONT> <B><FONT COLOR=#0000ff>-</B></FONT> <B><FONT COLOR=#0000ff>-k</B></FONT>
+
+       9) capture to 1000MB files, keeping just the most recent 10 (files):
+
+            <B><FONT COLOR=#0000ff>gulp</B></FONT> <B><FONT COLOR=#0000ff>-i</B></FONT> <B><FONT COLOR=#ff0000>eth1</B></FONT> <B><FONT COLOR=#0000ff>-C</B></FONT> <B><FONT COLOR=#0000ff>10</B></FONT> <B><FONT COLOR=#0000ff>-W</B></FONT> <B><FONT COLOR=#0000ff>10</B></FONT> <B><FONT COLOR=#0000ff>-o</B></FONT> <B><FONT COLOR=#ff0000>pcapdir</B></FONT>
+          or with help from tcpdump:
+            <B><FONT COLOR=#0000ff>gulp</B></FONT> <B><FONT COLOR=#0000ff>-i</B></FONT> <B><FONT COLOR=#ff0000>eth1</B></FONT> <B><FONT COLOR=#0000ff>|</B></FONT> <B><FONT COLOR=#0000ff>taskset</B></FONT> <B><FONT COLOR=#0000ff>-c</B></FONT> <B><FONT COLOR=#0000ff>2</B></FONT> <B><FONT COLOR=#0000ff>tcpdump</B></FONT> <B><FONT COLOR=#0000ff>-r-</B></FONT> <B><FONT COLOR=#0000ff>-C</B></FONT> <B><FONT COLOR=#0000ff>1000</B></FONT> <B><FONT COLOR=#0000ff>-W</B></FONT> <B><FONT COLOR=#0000ff>10</B></FONT> <B><FONT COLOR=#0000ff>-w</B></FONT> <B><FONT COLOR=#ff0000>pcapname</B></FONT>
+
+<B><FONT COLOR=#0000ff>BUGS</B></FONT>
+       On  some systems, one interrupt may not break out of the pcap library's
+       inner packet capture loop (if no packets  arrive  matching  the  filter
+       expression).  In that case, a second interrupt should do the trick.
+
+       On  a  busy network, Gulp may drop a few packets at startup while it is
+       initializing.  This makes Gulp look bad but is probably not  a  problem
+       in practice.
+
+<B><FONT COLOR=#0000ff>AUTHOR</B></FONT>
+       Written by Corey Satten, corey @ u.washington.edu
+
+       See <B><FONT COLOR=#0000ff>http://corey.elsewhere.org/gulp/</B></FONT> for more information and the  lat-
+       est version.
+
+       This manpage corresponds to Gulp version 1.58-crox.
+
+<B><FONT COLOR=#0000ff>COPYRIGHT</B></FONT>
+       Copyright (C) 2007 University of Washington
+
+<B><FONT COLOR=#0000ff>LICENSE</B></FONT>
+       Licensed under the Apache License, Version 2.0 (the "License"); you may
+       not  use  this  file  except  in  compliance with the License.  You may
+       obtain a copy of the License at
+
+           http://www.apache.org/licenses/LICENSE-2.0
+
+       Unless required by applicable law or agreed  to  in  writing,  software
+       distributed under the License is distributed on an "AS IS" BASIS, WITH-
+       OUT WARRANTIES OR CONDITIONS OF ANY KIND, either  express  or  implied.
+       See  the  License  for  the specific language governing permissions and
+       limitations under the License.
+
+<B><FONT COLOR=#0000ff>SEE</B></FONT> <B><FONT COLOR=#0000ff>ALSO</B></FONT>
+       <B><FONT COLOR=#0000ff>tcpdump(8),</B></FONT> <B><FONT COLOR=#0000ff>wireshark(1),</B></FONT> <B><FONT COLOR=#0000ff>ngrep(8),</B></FONT>  <B><FONT COLOR=#0000ff>tcptrace(1),</B></FONT>  <B><FONT COLOR=#0000ff>tcpflow(1),</B></FONT>  <B><FONT COLOR=#0000ff>ntop(8)</B></FONT>
+       <B><FONT COLOR=#0000ff>taskset(1)</B></FONT> and <B><FONT COLOR=#0000ff>pcap(3).</B></FONT>
+
+
+
+Gulp 1.0                           Jun 2007                            GULP(1)
+</PRE></BODY></HTML>

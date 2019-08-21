@@ -1,0 +1,367 @@
+<HTML>
+<HEAD>
+<TITLE>Lossless Gigabit Remote Packet Capture With Linux</TITLE>
+</HEAD>
+<BODY>
+<!BODY BGCOLOR=#f4f0f4!>
+<Center>
+<H1><A HREF=http://staff.washington.edu/corey/gulp/>
+Lossless Gigabit Remote Packet Capture With Linux</A></H1>
+<H4>Corey Satten<BR>
+University of Washington Network Systems<BR>
+<A HREF=http://staff.washington.edu/corey/>
+http://staff.washington.edu/corey</A><BR>
+August 9, 2007<BR><FONT SIZE=-1>(Updated: March 18, 2008)</FONT></H4>
+</Center>
+
+<H2> Overview </H2>
+
+<P> This paper is about two distinct but related things:
+<OL><LI> How to achieve
+lossless gigabit packet capture to disk with unmodified Linux on
+ordinary/modest PC hardware and
+<LI> Capturing packets remotely on a campus network (without connecting
+a capture box to the remote network).
+</OL></P>
+
+My software which does both is <A HREF=#links>freely available</A>
+and is called Gulp (visualize drinking quickly from the network firehose).
+
+<P> By publishing this paper, I hope to:
+<OL TYPE=A><LI> efficiently share my code, methods and
+insight with others interested in doing this and
+<LI> shed light on
+limitations in the Linux code base which hopefully can be fixed so Gulp
+is no longer needed.
+</OL></P>
+
+<H2> Background </H2>
+
+<P> At the University of Washington, we have a large network with many
+hundreds of subnets and close to 120,000 IP devices on our campus
+network.  Sometimes it is necessary to look at network traffic to
+diagnose problems.  Recently, I began a project to allow us to capture
+subnet-level traffic remotely (without having to physically connect
+remotely) to make life easier for our Security and Network Operations
+groups and to help diagnose problems more efficiently. </P>
+
+<P> Our Cisco 7600 routers have the ability to create a limited number
+of "Encapsulated Remote SPAN ports" (ERSPAN ports) which are similar to
+mirrored switch ports except the router "GRE" encapsulates the packets
+and sends them to an arbitrary IP address.  (GRE is in quotes because
+the Cisco GRE header is larger than the standard GRE header (it is 50
+bytes) so Linux and/or unmodified
+<A HREF=http://www.tcpdump.org>tcpdump</A> can not correctly decapsulate
+it).  </P>
+
+<P> Because the router will send the "GRE" encapsulated packets without any
+established state or confirmation on the receiver (as if sending UDP), I
+don't need to establish a tunnel on Linux to receive the packets.  I
+initially wrote a tiny (30-line) proof-of-concept decapsulator in C
+which could postprocess a tcpdump capture like this: </P>
+
+<PRE>
+tcpdump -i eth1 -s0 -w - proto gre | <A HREF=conv.c>conv</A> &gt; pcapfile
+or
+tcpdump -i eth1 -s0 -w - proto gre | <A HREF=conv.c>conv</A> | tcpdump -s0 -r - -w pcapfile ...
+</PRE>
+
+<P> My initial measurements indicated that the percentage of dropped
+packets and CPU overhead of writing through the conversion program and
+then to disk were not significantly higher than writing directly to disk
+so I thought this was a reasonable plan.  On my old desktop workstation,
+a 3.2GHz P4 Dell Optiplex 270 with slow 32-bit PCI bus and a built-in
+10/100/1000 Intel 82540EM NIC) running Fedora Core 6 Linux (2.6.19
+kernel, ethtool&nbsp;-G&nbsp;eth0&nbsp;rx&nbsp;4096), I could capture
+and save close to 180Mb/s of <A
+HREF=http://dast.nlanr.net/Projects/Iperf/>iperf</A> traffic with about
+1% packet loss so it seemed worth pursuing.  Partly to facilite this and
+partly for unrelated reasons, I bought a newer/faster office PC. </P>
+
+<H2> What Did and Didn't Work </H2>
+
+<P> To my surprise, my new office PC (a Dell Precision 690 with 2.66 GHz
+quad-core Xeon x5355, PCI-Express-based Intel Pro-1000-PT NIC, faster
+RAM and SATA disks) running the same (Fedora Core 6) OS, initially
+dropped more packets than my old P4 system did, even though each of the 4
+CPU cores does about 70% more than my old P4 system (according to my
+benchmarks).  I spent a long time trying to tune the OS by changing
+various parameters in <CODE><B>/proc</B></CODE> and
+<CODE><B>/sys</B></CODE>, trying to tune the e1000 NIC driver's tunable
+parameters and fiddling with scheduling priority and processor affinity
+(for processes, daemons and interrupts).  Although the number of
+combinations and permutations of things to change was high, I gradually
+made enough progress that I continued down this path for far too long
+before discovering the right path.  </P>
+
+<P> Two things puzzled me:
+"<A HREF=http://xosview.sourceforge.net/>xosview</A>"
+(a system load visualization tool) always showed plenty of idle
+resources when packets were dropped and writing packets to disk seemed
+to have a disproportionate impact on packet loss, especially when the
+system buffer cache was full. </P>
+
+<P> It eventually occurred to me to try to decouple disk writing from packet
+reading.  I tried piping the output of the capturing tcpdump program into an
+old (circa 1990) <A HREF=http://gd.tuwien.ac.at/utils/archivers/buffer>tape
+buffering program</A> (written by Lee McLoughlin) which ran as two processes
+with a small shared-memory ring buffer.  Remarkably, piping the output through
+McLoughlin's buffer program caused tcpdump to drop fewer packets.  Piping
+through "dd" with any write size and/or buffer size or through "cat" did not
+provide any improvement.  My best guess as to why McLoughlin's buffer helped is
+that even though the select(2) system call says writes to disk never block,
+they effectively do.  When the writes block, tcpdump can't read packets from
+the kernel quickly enough to prevent the NIC's buffer from overflowing.
+</P>
+
+<P> A quick look at the code in McLoughlin's buffer program convinced me I
+would do better starting from scratch so I wrote a simple multi-threaded
+ring-buffer program (which became Gulp).  For both simplicity and efficiency
+under load, I designed it to be completely lock-free.  The multi-threaded ring
+buffer worked remarkably well and considerably increased the rate at which I
+could capture without loss but, at higher packet rates, it still dropped
+packets--especially while writing to disk. </P>
+
+<P> I emailed <A HREF=http://luca.ntop.org>Luca Deri</A>, the author
+of Linux's <A HREF=http://www.ntop.org/PF_RING.html>PF_RING NIC driver</A>,
+and he (correctly) suggested that it would be easy to
+incorporate the packet capture into the ring buffer program itself
+(which I did).  This ultimately was a good idea but initially didn't
+seem to help much.  Eventually I figured out why: the Linux scheduler
+sometimes scheduled both my reader and writer threads on the same
+CPU/core which caused them to run alternately instead of simultaneously.
+When they ran alternately, the packet reader was again starved of CPU
+cycles and packet loss occurred.  The solution was simply to explicitly
+assign the reader and writer threads to different CPU/cores and to
+increase the scheduling priority of the packet reading thread.  These
+two changes improved performance so dramatically that dropping any
+packets on a gigabit capture, written entirely to disk, is now a rare
+occurrence and many of the system performance tuning hacks I resorted to
+earlier have been backed out.  (I now suspect they mostly helped by
+indirectly influencing process scheduling and cpu affinity--something I
+now control directly--however on systems with more than
+two CPU cores, the
+<A HREF=http://staff.washington.edu/corey/tools/inter-core-benchmark.html>
+inter-core-benchmark</A> I developed may still be helpful to determine which
+cores work most efficiently together). </P>
+
+<P> On some systems, increasing the default
+size of receive socket buffers also helps: <BR>
+<CODE>echo&nbsp;4194304&nbsp;>&nbsp;/proc/sys/net/core/rmem_max;
+echo&nbsp;4194304&nbsp;>&nbsp;/proc/sys/net/core/rmem_default</CODE></P>
+
+<H2> Performance of Our Production System </H2>
+
+<P> Our (pilot) production system for gigabit remote packet capture is a
+Dell PowerEdge model 860 with a single Intel Core2Duo CPU (x3070) at
+2.66 GHz (hyperthreading disabled) running RedHat Enterprise Linux 5
+(RHEL5 2.6.18 kernel).  It has 2GB RAM, two WD2500JS 250GB SATA drives
+in a striped ext2 logical volume (essentially software RAID 0 using LVM)
+and an Intel Pro1000 PT network interface (NIC) for packet capture.
+(The builtin BCM5721 Broadcom NICs are unable to capture the slightly
+jumbo frames required for Cisco ERSPAN--they may work for non-jumbo
+packet capture but I haven't tested them.  The Intel NIC does consume a
+PCI-e slot but costs only about $40.) </P>
+
+<P> A 2-minute capture of as much
+<A HREF=http://dast.nlanr.net/Projects/Iperf/>iperf</A> data as I can
+generate into a 1Gb ERSPAN port (before the ERSPAN link saturates and
+the router starts dropping packets) results in a nearly 14GB pcap file
+usually with no packets dropped by Linux.  The packet rate for that
+traffic is about 96k pps avg.  The router port sending the ERSPAN
+traffic was nearly saturated (900+Mb/s) and the sum of the average iperf
+throughputs was 818-897Mb/s (but unlike ethernet, I believe iperf
+reports only payload bits counted in 1024^2 millions so this translates
+to 857-940Mb/s in decimal/ethernet millions not counting packet
+headers).  Telling iperf to use smaller packets, I was able to capture
+all packets at 170k pps avg but I could only 2/3 saturate the gigabit
+network using iperf and small packets with the hardware at my disposal.
+</P>
+
+<P> A subsequent test using a "SmartBits" packet generator to roughly
+84% saturate the net with 300-byte packets indicates I can capture and
+write to disk 330k pps without dropping any packets.  Interestingly the
+failure mode at higher packet rates is that there is insufficient CPU
+capacity left to empty Gulp's ring buffer as fast as it fills.  Gulp did
+not start dropping packets until its ring buffer eventually filled.
+This demonstrates that Linux can be very
+successful at capturing packets at high speed and delivering them to
+user processes as long as the reading process can read them from the
+kernel fast enough that the NIC-driver's relatively small ring
+buffer does not overflow.  At very high packet rates, even though the
+e1000 NIC driver does interrupt aggregation,
+<A HREF=http://xosview.sourceforge.net/>xosview</A> indicated that much of
+the CPU was consumed with "hard" and "soft" interrupt processing. </P>
+
+<P> In summary, I believe as long as the average packet size is 300 or
+more, our system should be able to capture and write to disk every
+packet it receives from a gigabit ethernet.  The larger the average
+packet size, the more CPU headroom is available and the more certain is
+capturing every packet.
+</P>
+
+<P> I should mention that I have been using Shawn Ostermann's
+"<A HREF=http://jarok.cs.ohiou.edu/software/tcptrace/>tcptrace</A>"
+program to confirm that when tcpdump or Gulp reports that the kernel
+dropped no packets, this is indeed true.  Likewise, when the tools
+report the kernel dropped some packets, tcptrace agrees.  This means I have
+complete confidence in my claims above for capturing iperf data without
+loss.  Although the SmartBits did not generate TCP traffic, it offered
+counts of how many packets it sent which agree with what was captured. </P>
+
+<H2>Examples of Gulp Usage</H2>
+
+<UL>
+<PRE>
+0) the <A HREF=gulpman.pdf>Gulp manpage.pdf</A> or <A HREF=gulpman.html>Gulp manpage.html</A> (converted with <A HREF=http://staff.washington.edu/corey/tools.html#bold2html>bold2html</A>).
+
+1) helping tcpdump drop fewer packets when writing to disk:
+   (gulp -c can be used in any pipeline as it does no data interpretation)
+
+    <FONT COLOR=0000c0>tcpdump -i eth1 -w - ... | gulp -c &gt; pcapfile</FONT>
+      or if you have more than 2 CPUs, run tcpdump and gulp on different ones:
+    <FONT COLOR=0000c0>taskset -c 2 tcpdump -i eth1 -w - ... | gulp -c &gt; pcapfile</FONT>
+
+   (gulp uses CPUs #0,1 so taskset runs tcpdump on #2 to reduce interference)
+
+2) a similar but more efficient capture using Gulp's native capture ability:
+
+    <FONT COLOR=0000c0>gulp -i eth1 -f "..." &gt; pcapfile</FONT>
+
+3) capture and GRE-decapsulate an ERSPAN feed and save the result to disk:
+
+    <FONT COLOR=0000c0>gulp -i eth1 -d &gt; pcapfile</FONT>
+
+4) capture, decapsulate and then filter with tcpdump before saving:
+
+    <FONT COLOR=0000c0>gulp -i eth1 -d | tcpdump -r - -s0 -w pcapfile ...</FONT>
+      or if you have more than 2 CPUs, run tcpdump and gulp on different ones:
+    <FONT COLOR=0000c0>gulp -i eth1 -d | taskset -c 2 tcpdump -r - -s0 -w pcapfile ...</FONT>
+
+5) capture everything to disk; then decapsulate offline:
+
+    <FONT COLOR=0000c0>gulp -i eth1 &gt; pcapfile1; gulp -d -i - &lt; pcapfile1 &gt; pcapfile2</FONT>
+
+6) capture, decapsulate and filter with <A HREF=http://ngrep.sourceforge.net/>ngrep</A>:
+
+    <FONT COLOR=0000c0>gulp -i eth1 -d | ngrep -I - -O pcapfile regex ...</FONT>
+
+7) capture, decapsulate and feed into <A HREF=http://www.ntop.org>ntop</A>:
+
+    <FONT COLOR=0000c0>gulp -i eth1 -d | ntop -f /dev/stdin -m a.b.c.d/x ...</FONT>
+      or
+    <FONT COLOR=0000c0>mkfifo pipe; chmod 644 pipe; gulp -i eth1 -d > pipe & ntop -u ntop -f pipe -m a.b.c.d/x ...</FONT>
+
+8) capture, decapsulate and feed into <A HREF=http://www.wireshark.org>wireshark</A>:
+
+    <FONT COLOR=0000c0>gulp -i eth1 -d | /usr/sbin/wireshark -i - -k</FONT>
+
+9) capture to 1000MB files, keeping just the most recent 10 (files):
+
+    <FONT COLOR=0000c0>gulp -i eth1 -C 10 -W 10 -o pcapdir</FONT>
+      or with help from tcpdump:
+    <FONT COLOR=0000c0>gulp -i eth1 | taskset -c 2 tcpdump -r- -C 1000 -W 10 -w pcapname</FONT>
+</PRE>
+</UL>
+
+<H2> Suggestions for improvements to the Linux code base </H2>
+
+<OL>
+<LI> <P> Normally if one is interested in capturing only a subset of the
+traffic on an interface, the pcap library can filter out the uninteresting
+packets in the kernel (as early as possible) to avoid the overhead of
+copying them into userspace and then discarding them. </P>
+
+<P> Because neither the Linux GRE tunnel mechanism, i.e.:
+
+<PRE>
+# modprobe ip_gre
+# ip tunnel add gre1 local x.y.78.60 remote x.y.78.4 mode gre
+# ifconfig gre1 up
+# tcpdump -i gre1
+</PRE>
+
+<P> nor the pcap code seems to be capable of decapsulating GRE packets with a
+non-standard header length (50 bytes in this case) and then applying normal
+pcap filters to what remains, I can do no in-kernel filtering on the contents
+of the ERSPAN packets--they must all be copied to userspace, decapsulated
+and then filtered again by tcpdump (wireshark or equivalent) as per
+examples #4-6 above. </P>
+
+<P> Extensions to either the pcap code or the GRE tunnel mechanism should be
+able to add the ability to capture a subset of packets more efficiently by
+filtering them out in the kernel.  I have not measured the overhead of
+"ip tunnel" but I presume doing this in the pcap code would be simplest
+and most efficient. </P>
+
+<LI><P> Perhaps select(2) should not always say a descriptor to an open file
+on disk will not block for write(2) or alternatively, perhaps the writes
+can be made faster so they agree with select(2) and don't block. </P>
+
+<A NAME=64bit>
+
+<LI><P> I think "<CODE>struct&nbsp;pcap_pkthdr</CODE>" in <CODE>pcap.h</CODE>
+should be re-defined to be independent of <CODE>sizeof(long)</code>.  In pcap
+files, a <CODE>struct&nbsp;pcap_pkthdr</CODE> precedes every packet.
+Unfortunately, the size of <CODE>struct&nbsp;pcap_pkthdr</CODE> (which contains
+a <CODE>struct&nbsp;timeval</CODE>) depends upon <CODE>sizeof(long)</CODE>.
+This makes pcap files from 64-bit linux systems incompatible with those from
+32-bit systems.  Apparently as a workaround, some 64-bit linux distributions
+are providing tcpdump and wireshark binaries which read/write 32-bit compatible
+pcap files (which makes Gulp's pcap output appear to be corrupt).  </P>
+
+<P>
+(To build Gulp on 64-bit linux systems so that it reads/writes 32-bit
+compatible pcap files, try installng the 32-bit (i386) "libpcap-devel"
+package and making Gulp with "-m32" added to CFLAGS.)</P> </A>
+
+</OL>
+
+<H2> Future Work </H2>
+
+<P> To my surprise, I learned after completing this work that Luca
+Deri's PF_RING patch is NOT already incorporated in the standard Linux kernel
+(as I mistakenly thought) and the packet "ring buffer" that "ethtool"
+adjusts is something different.  Though this misunderstanding is
+somewhat embarrassing to me, it seems likely that the benefits of Gulp
+and PF_RING will be cumulative and since my next obvious goal is 10Gb I look
+forward to confirming that.  </P>
+
+<A NAME=links>
+<H2> Program Source and Links of Interest</H2>
+</A>
+
+<OL>
+<LI> <A HREF=gulp.tgz>Gulp Source Code Bundle</A> released under the
+     <A HREF=http://www.apache.org/licenses/LICENSE-2.0>Apache License Version 2.0</A>
+<LI> <A HREF=gulpman.pdf>Gulp manpage.pdf</A> or
+     <A HREF=gulpman.html>Gulp manpage.html</A> (converted with <A HREF=http://staff.washington.edu/corey/tools.html#bold2html>bold2html</A>)
+<LI> <A HREF=http://staff.washington.edu/corey/tools/inter-core-benchmark.html>inter-core-benchmark</A>
+<LI> <A HREF=http://dast.nlanr.net/Projects/Iperf/>iperf</A>
+<LI> <A HREF=http://luca.ntop.org>Luca Deri</A>
+<LI> <A HREF=http://gd.tuwien.ac.at/utils/archivers/buffer>McLoughlin's buffer program</A>
+<LI> <A HREF=http://ngrep.sourceforge.net/>ngrep</A>
+<LI> <A HREF=http://www.ntop.org/PF_RING.html>PF_RING NIC driver</A>
+<LI> <A HREF=http://www.tcpdump.org>tcpdump</A>
+<LI> <A HREF=http://jarok.cs.ohiou.edu/software/tcptrace/>tcptrace</A>
+<LI> <A HREF=http://xosview.sourceforge.net/>xosview</A>
+<LI> <A HREF=http://www.ntop.org/>ntop</A>
+<LI> <A HREF=http://www.wireshark.org>WireShark</A>
+</OL>
+
+<HR><HR>
+
+<P>
+<B>Corey Satten</B> <BR>
+Email -- <B>corey @ u.washington.edu</B> <BR>
+Web -- <A HREF=http://staff.washington.edu/corey/>http://staff.washington.edu/corey/</A> <BR>
+Date -- <B>
+Tue Mar 18 14:14:09 PDT 2008
+</B>
+
+<P>&#160;</P> <P>&#160;</P> <P>&#160;</P> <P>&#160;</P> <P>&#160;</P>
+<P>&#160;</P> <P>&#160;</P> <P>&#160;</P> <P>&#160;</P> <P>&#160;</P>
+<P>&#160;</P> <P>&#160;</P> <P>&#160;</P> <P>&#160;</P> <P>&#160;</P>
+<P>&#160;</P> <P>&#160;</P> <P>&#160;</P> <P>&#160;</P> <P>&#160;</P>
+</BODY>
+
