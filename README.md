@@ -62,9 +62,15 @@ sudo bin/gulp -i enp111s0 -r 100 -C 1 -o tmp/ -n my_filename -t
 ```
 
 ## Runing without root
+If gulf executable is in `bin/gulp`:
 ```
 sudo groupadd pcap
 sudo usermod -a -G pcap $USER
-sudo chgrp pcap gulp
+sudo chgrp pcap bin/gulp
 sudo setcap cap_ipc_lock,cap_sys_nice,cap_net_raw,cap_net_admin=eip bin/gulp
 ```
+Short explanation why we need these capabilities:
+* `cap_ipc_lock` is required because we're calling `mlock` which guarantees us that the buffer in RAM will stay in RAM
+and will not be transferred to the SWAP area (in case another process would require more then available RAM) 
+* `cap_sys_nice` sets the reader thread to high CPU priority
+* `cap_net_raw` and `cap_net_admin` allow us to capture on the network device without being root
