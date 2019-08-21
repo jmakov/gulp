@@ -42,6 +42,7 @@ Usage: ./gulp [--help | options]
 ```
 
 ## Runing without root
+Currently not possible (see https://github.com/jmakov/gulp/issues/1)
 ```
 sudo groupadd pcap
 sudo usermod -a -G pcap $USER
