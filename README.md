@@ -4,10 +4,11 @@ This repository is based on the latest patches from the original contributor (ht
 
 # Dependencies
 * pcap.h
+* cmake
 
 Quick dependencies install command for Ubuntu (tested on Ubuntu 19.04)
 ```
-sudo apt-get install libpcap-dev
+sudo apt-get install libpcap-dev cmake
 ```
 # Usage
 ```
@@ -40,6 +41,28 @@ Usage: ./gulp [--help | options]
       -B        check if select(2) would ever have blocked on write
       -Y        avoid writes which would block
 ```
+
+## Examples
+Save captured network traffic to a file with UTC timestamp in file names e.g. `my_filename_20190821100215.pcap`
+```
+mkdir -p tmp
+sudo bin/gulp -i enp111s0 -t -o tmp/ -n my_filename
+```
+ 
+Create a new file when the old grows over 100MB:
+```
+mkdir -p tmp
+sudo bin/gulp -i enp111s0 -r 100 -C 1 -o tmp/ -n my_filename
+```
+
+Create a new file when the old grows over 100MB and include UTC timestamp in newly created file name:
+```
+mkdir -p tmp
+sudo bin/gulp -i enp111s0 -r 100 -C 1 -o tmp/ -n my_filename -t
+```
+
+
+
 
 ## Runing without root
 Currently not possible (see https://github.com/jmakov/gulp/issues/1)

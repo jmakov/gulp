@@ -528,10 +528,28 @@ newoutfile(char *dir, int num) {
 	}
     snprintf(tfile, sizeof(tfile), "%s%s", dir, TEMPLATE);
     if (tflag) {
-    	snprintf(ofile, sizeof(ofile), "%s/%s%lld.%03d", dir, oname, (long long int)time(NULL), num);
+//    	snprintf(ofile, sizeof(ofile), "%s/%s%lld.%03d", dir, oname, (long long int)time(NULL), num);
+        char outstr[200];
+        time_t t;
+        struct tm *tmp;
+        const char* fmt = "%Y%m%d%H%M%S";
+
+        t = time(NULL);
+        tmp = gmtime(&t);
+        if (tmp == NULL) {
+            perror("gmtime error");
+            exit(EXIT_FAILURE);
+        }
+
+        if (strftime(outstr, sizeof(outstr), fmt, tmp) == 0) {
+            fprintf(stderr, "strftime returned 0");
+            exit(EXIT_FAILURE);
+        }
+
+        snprintf(ofile, sizeof(ofile), "%s/%s_%s.pcap", dir, oname, outstr);
 	}
     else {
-    	snprintf(ofile, sizeof(ofile), "%s/%s%03d", dir, oname, num);
+    	snprintf(ofile, sizeof(ofile), "%s/%s%03d.pcap", dir, oname, num);
 	}
     int tmpfd = mkstemp(tfile);
     fchown(tmpfd, getuid(), -1);	/* in case running setuid */
