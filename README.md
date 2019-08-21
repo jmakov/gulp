@@ -2,6 +2,13 @@
 Original work from https://staff.washington.edu/corey/gulp/ and http://blog.crox.net/archives/72-gulp-tcpdump-alternative-for-lossless-capture-on-Linux.html.
 This repository is based on the latest patches from the original contributor (http://blog.crox.net/uploads/gulp-1.58-crox.tgz).
 
+# Dependencies
+* pcap.h
+
+Quick dependencies install command for Ubuntu (tested on Ubuntu 19.04)
+```
+sudo apt-get install libpcap-dev
+```
 # Usage
 ```
 Usage: ./gulp [--help | options]
