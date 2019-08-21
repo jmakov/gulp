@@ -1,0 +1,744 @@
+diff -uNba gulp-1.58.amd64/gulp.1 gulp-1.58.crox/gulp.1
+--- gulp-1.58.amd64/gulp.1	2008-03-14 21:55:55.000000000 +0100
++++ gulp-1.58.crox/gulp.1	2012-11-15 22:27:12.000000000 +0100
+@@ -70,6 +70,9 @@
+ capture process, which reduces capture overhead and pcap file sizes.
+ (If used with "-d", specifies length after decapsulation.)
+ .TP
++\fB\-F\fR
++Skip default check that the capture interface is an Ethernet interface.
++.TP
+ \fB\-x\fR
+ Use file locking to request (via exclusive lock) that this be the only
+ instance of \fBGulp\fR running.  If other instances are already running,
+@@ -123,6 +126,14 @@
+ and counts up).  To prevent mischief, the directory must exist (and be
+ writable by the user running Gulp if Gulp is running setuid).
+ .TP
++\fB\-n \fIname\fR
++Specify a filename prefix of \fIname\fP instead of the default \fBpcap\fP.
++.TP
++\fB\-t\fR
++When set, the current timestamp will be appended after \fIname\fP. This
++option implicitely sets \fB\-z 1000\fP (and so always produces filenames
++like \fIname\fP1234567890.\fI###\fP).
++.TP
+ \fB\-C \fI#\fR
+ When using the -o option above, start a new pcap file when the old one
+ reaches about # times the size of the ring buffer.  The default value is
+@@ -131,10 +142,18 @@
+ read an entire pcap file into memory when using it, splitting the output
+ into chunks can be helpful.
+ .TP
++\fB\-G \fI#\fR
++If set, specifies the maximum delay (in seconds) after which a new output
++file is created (same behavior as the equivalent \fBtcpdump\fP option).
++.TP
+ \fB\-W \fI#\fR
+ Specifies a maximum number of pcap files to create before overwriting
+ them.  The default is to never overwrite them.  This option allows capturing
+ indefinitely (waiting for a problem to occur) with finite disk space.
++.TP
++\fB\-Z \fIpostrotate-command\fR
++If set, specifies a command to post-process each capture file after they got
++rotated.
+ .SH OTHER OPTIONS
+ .TP
+ \fB\-B\fR
+@@ -224,10 +243,10 @@
+ .SH AUTHOR
+ Written by Corey Satten, corey \@ u.washington.edu
+ .LP
+-See \fBhttp://staff.washington.edu/corey/gulp/\fP for more information and
++See \fBhttp://corey.elsewhere.org/gulp/\fP for more information and
+ the latest version.
+ .LP
+-This manpage corresponds to Gulp version 1.58.
++This manpage corresponds to Gulp version 1.58-crox.
+ .SH COPYRIGHT
+ Copyright \(co 2007 University of Washington
+ .SH LICENSE
+diff -uNba gulp-1.58.amd64/gulp.c gulp-1.58.crox/gulp.c
+--- gulp-1.58.amd64/gulp.c	2017-02-03 19:09:56.624256739 +0100
++++ gulp-1.58.crox/gulp.c	2017-02-03 19:26:42.628710835 +0100
+@@ -88,6 +88,7 @@
+ #include <sys/resource.h>
+ #include <fcntl.h>
+ #include <limits.h>
++#include <sys/wait.h>
+ 
+ #define gettid() syscall(__NR_gettid)	/* missing in headers? */
+ #define RINGSIZE 1024*1024*100	/* about 5 seconds of data at 200Mb/s */
+@@ -134,7 +135,8 @@
+ pcap_t *handle = 0;		/* packet capture handle */
+ struct pcap_stat pcs;		/* packet capture filter stats */
+ int got_stats = 0;		/* capture stats have been obtained */
+-char *id = "@(#) Gulp RCS $Revision: 1.58 $"; /* automatically maintained */
++char *id = "@(#) Gulp RCS $Revision: 1.58-crox $"; /* automatically maintained */
++int  check_eth = 1;		/* check that we are capturing from an Ethernet device */
+ int  would_block = 0;		/* for academic interest only */
+ int  check_block = 0;		/* use select to see if writes would block */
+ int  yield_if_blocking = 0;	/* experimental: may help on uniprocessors */
+@@ -143,11 +145,21 @@
+ int  xlock = 0;			/* set if exclusive lock requested */
+ int  lockfd;			/* open descriptor to file to lock */
+ char *odir = 0;			/* requested output directory name */
++char wfile[PATH_MAX];		/* output filename */
++char *oname = "pcap";		/* requested output file name */
++int  tflag = 0;			/* append timestamp to the file name */
+ int  filec = 0;			/* output file number */
+ struct pcap_file_header fh;	/* begins every pcap file */
+ int  split_after = 10;		/* start new output file after # ringbufs */
++int  split_seconds = 0;		/* start new output file after # seconds */
++time_t bdry_time = 0;           /* packet capture output file open time */
++int  time_split = 0;		/* 1 when time() - bdry_time > split_seconds */
+ int  max_files = 0;		/* upper bound on filec */
+ int  volatile reader_ready = 0;	/* reader thread no longer needs root */
++char *zcmd = NULL;              /* processes each savefile using a specified command */
++int  zflag = 0;
++static void child_cleanup(int); /* to avoid zombies, see below */
++
+ 
+ /*
+  * put data onto the end of global ring buffer "buf"
+@@ -175,6 +187,9 @@
+ 	if (eof) return;
+ 	}
+     if (len > 0 && len < avail) {	/* ring buffer space available */
++        if (bdry && (split_seconds != 0) && ((time(NULL) - bdry_time) >= split_seconds)) {
++	    time_split = 1;
++	    }
+ 	if (end + len <= ringsize) {	  /* no wrap to beginning needed */
+ 	    memcpy(buf+end, ptr, len);
+ 	    }
+@@ -190,9 +205,12 @@
+ 	else {
+ 	    end += len;
+ 	    }
+-	if (just_wrapped && bdry) {
++	if (time_split || (just_wrapped && bdry)) {
++	    if (just_wrapped) {
++		wrap_cnt++;
+ 	    just_wrapped = 0;
+-	    if (odir && ++wrap_cnt >= split_after) {
++		}
++	    if (odir && (wrap_cnt >= split_after || time_split)) {
+ 		while (boundary >= 0) {	  /* last split still pending */
+ 		    if (warned<push) {
+ 			warned = push;
+@@ -208,6 +226,8 @@
+ 		 */
+ 		boundary = end;
+ 		wrap_cnt = 0;
++		bdry_time = time(NULL);
++		time_split = 0;
+ 		if (!just_copy) append((char *)&fh, sizeof(fh), 0);
+ 		}
+ 	    }
+@@ -358,7 +378,7 @@
+     reader_ready = 1;
+ 
+     /* make sure we're capturing on an Ethernet device */
+-    if (pcap_datalink(handle) != DLT_EN10MB) {
++    if (check_eth == 1 && pcap_datalink(handle) != DLT_EN10MB) {
+ 	fprintf(stderr, "%s: %s is not an Ethernet\n", progname, dev);
+ 	exit(EXIT_FAILURE);
+     }
+@@ -457,6 +477,34 @@
+     }
+ 
+ /*
++ * Post-process capture files after they have been rotated
++ * (copied from tcpdump)
++ */
++static void
++child_cleanup(int signo)
++{
++  wait(NULL);
++}
++
++void process_savefile(char filename[PATH_MAX])
++    {
++    if (fork())
++	return;
++    /* set to lowest priority */
++#ifdef NZERO
++    setpriority(PRIO_PROCESS, 0, NZERO - 1);
++#else
++    setpriority(PRIO_PROCESS, 0, 19);
++#endif
++    if (zflag) {
++        if (execlp(zcmd, zcmd, filename, (char *)NULL) == -1) {
++	    fprintf(stderr, "compress_savefile: execlp(%s, %s): %s\n", zcmd,
++		filename, strerror(errno));
++	    }
++	}
++    }
++
++/*
+  * Redirect standard output into a new capture file in the specified directory.
+  *
+  * In case Gulp is running setuid root, try to prevent a user from
+@@ -479,7 +527,12 @@
+ 	return (0);
+ 	}
+     snprintf(tfile, sizeof(tfile), "%s%s", dir, TEMPLATE);
+-    snprintf(ofile, sizeof(ofile), "%s/pcap%03d", dir, num);
++    if (tflag) {
++    	snprintf(ofile, sizeof(ofile), "%s/%s%lld.%03d", dir, oname, (long long int)time(NULL), num);
++	}
++    else {
++    	snprintf(ofile, sizeof(ofile), "%s/%s%03d", dir, oname, num);
++	}
+     int tmpfd = mkstemp(tfile);
+     fchown(tmpfd, getuid(), -1);	/* in case running setuid */
+     if (tmpfd >= 0) {
+@@ -491,6 +544,13 @@
+ 	dup2(tmpfd, fileno(stdout));	/* try to use the initial fd */
+ 	close(tmpfd);
+ 	rename(tfile, ofile);
++	if (odir) {
++	    if (zflag) {
++		process_savefile(wfile);
++		}
++	    }
++	/* wfile = ofile; */
++	snprintf(wfile, sizeof(wfile), "%s", ofile);
+ 	return (1);
+ 	}
+     else {
+@@ -533,6 +593,13 @@
+ 	seteuid(getuid());		/* drop setuid privilege */
+ 	}
+ 
++    if (tflag) {
++	if (max_files && max_files != 1000) {
++	    fprintf(stderr, "%s: -W will be set to 1000 because -t is also set\n", progname); 
++	    }
++	max_files = 1000;
++	}
++
+     if (odir && !newoutfile(odir, filec++)) {
+ 	exit(1);
+ 	}
+@@ -601,6 +668,9 @@
+ 	    }
+ 	pushed = push;
+ 	}
++    if (odir) {
++	process_savefile(wfile);
++	}
+     pthread_exit(NULL);
+     }
+ 
+@@ -618,6 +688,7 @@
+     "      -f \"...\"\tspecify a pcap filter - see manpage and -d\n"
+     "      -i eth#|-\tspecify ethernet capture interface or '-' for stdin\n"
+     "      -s #\tspecify packet capture \"snapshot\" length limit\n"
++    "      -F\tskip the interface type (Ethernet) check\n"
+ #endif /* JUSTCOPY */
+     "      -r #\tspecify ring buffer size in megabytes (1-1024)\n"
+     "      -c\tjust buffer stdin to stdout (works with arbitrary data)\n"
+@@ -630,8 +701,12 @@
+     "      -z #\tspecify write blocksize (even power of 2, default 65536)\n"
+     "    for long-term capture\n"
+     "      -o dir\tredirect pcap output to a collection of files in dir\n"
++    "      -n name\tfilename (default: pcap)\n"
++    "      -t\tappend a timestamp to the filename\n"
+     "      -C #\tlimit each pcap file in -o dir to # times the (-r #) size\n"
+-    "      -W #\toverwrite pcap files in -o dir rather than start #+1\n"
++    "      -G #\trotates the pcap file every # seconds\n"
++    "      -W #\toverwrite pcap files in -o dir rather than start #+1 (max_files)\n"
++    "      -Z postrotate-command\trun 'command file' after each rotation\n"
+     "    and some of academic interest only:\n"
+     "      -B\tcheck if select(2) would ever have blocked on write\n"
+     "      -Y\tavoid writes which would block\n"
+@@ -662,15 +737,18 @@
+ 
+     if (argc > 1 && strcmp(argv[1], "--help") == 0) ++errflag; else
+ #ifndef JUSTCOPY
+-    while ((c = getopt(argc, argv, "BXYcdqvxf:i:p:r:s:z:V:o:C:W:")) != EOF)
++    while ((c = getopt(argc, argv, "BFXYcdqtvxf:i:p:r:s:z:V:o:n:C:G:W:Z:")) != EOF)
+ #else  /* JUSTCOPY */
+-    while ((c = getopt(argc, argv, "BXYcqvxp:r:z:V:o:C:W:")) != EOF)
++    while ((c = getopt(argc, argv, "BXYcqtvxp:r:z:V:o:n:C:G:W:Z:")) != EOF)
+ #endif /* JUSTCOPY */
+ 	{
+ 	switch (c) {
+ 	    case 'B':
+ 		check_block = 1;	/* use select to avoid write blocking */
+ 		break;
++	    case 'F':
++		check_eth = 0;	        /* don't check that we are capturing from an */
++		break;                  /* Ethernet device */
+ 	    case 'Y':
+ 		check_block = 1;
+ 		yield_if_blocking = 1;	/* don't issue blocking writes */
+@@ -744,6 +822,12 @@
+ 		    errflag++;
+ 		    }
+ 		break;
++	    case 't':
++		tflag = 1;
++		break;
++	    case 'n':
++		oname = optarg;
++		break;
+ 	    case 'o':
+ 		odir = optarg;
+ 		if (strlen(odir) >= PATH_MAX-strlen(TEMPLATE)-1) {
+@@ -760,6 +844,14 @@
+ 		    errflag++;
+ 		    }
+ 		break;
++	    case 'G':
++		split_seconds = atoi(optarg);
++		if (split_seconds < 1) {
++		    fprintf(stderr, "%s: -G # must be 1 or greater\n",
++			progname);
++		    errflag++;
++		    }
++		break;
+ 	    case 'W':
+ 		max_files = atoi(optarg);
+ 		if (max_files < 1) {
+@@ -768,6 +860,10 @@
+ 		    errflag++;
+ 		    }
+ 		break;
++	    case 'Z':
++		zcmd = optarg;
++                zflag = 1;
++		break;
+ 	    default:
+ 		errflag++;
+ 		break;
+@@ -778,6 +874,9 @@
+ 	exit(1);
+ 	}
+ 
++    /* to avoid zombies when using -Z */
++    (void)sigset(SIGCHLD, child_cleanup);
++
+     /*
+      * if -d is spcified, -s refers to decapsulated sizes, make it happen
+      */
+diff -uNba gulp-1.58.amd64/gulpman.html gulp-1.58.crox/gulpman.html
+--- gulp-1.58.amd64/gulpman.html	2008-03-14 21:56:09.000000000 +0100
++++ gulp-1.58.crox/gulpman.html	2012-11-15 22:27:12.000000000 +0100
+@@ -52,8 +52,8 @@
+               decapsulate offline this way).
+ 
+        <B><FONT COLOR=#0000ff>-r</B></FONT> <B><FONT COLOR=#ff0000>#</B></FONT>   Specify  a  ring buffer size (in megabytes).  Values from 1-1024
+-              are permitted, the default is  100MB.   If  possible,  the  ring
+-              buffer will be locked into RAM.
++              are permitted, the default is 100MB.  If possible, the ring buf-
++              fer will be locked into RAM.
+ 
+        <B><FONT COLOR=#0000ff>-c</B></FONT>     Just  copy  and  buffer bytes from stdin to stdout -- don't read
+               packets from the network and don't  assume  anything  about  the
+@@ -66,6 +66,9 @@
+               ture  overhead  and pcap file sizes.  (If used with "-d", speci-
+               fies length after decapsulation.)
+ 
++       <B><FONT COLOR=#0000ff>-F</B></FONT>     Skip  default  check  that  the capture interface is an Ethernet
++              interface.
++
+        <B><FONT COLOR=#0000ff>-x</B></FONT>     Use file locking to request (via exclusive lock)  that  this  be
+               the  only  instance  of  <B><FONT COLOR=#0000ff>Gulp</B></FONT>  running.   If other instances are
+               already running, they must be stopped  before  Gulp  will  start
+@@ -118,6 +121,13 @@
+               (and  be  writable  by  the user running Gulp if Gulp is running
+               setuid).
+ 
++       <B><FONT COLOR=#0000ff>-n</B></FONT> <B><FONT COLOR=#ff0000>name</B></FONT>
++              Specify a filename prefix of <B><FONT COLOR=#ff0000>name</B></FONT> instead of the default <B><FONT COLOR=#0000ff>pcap</B></FONT>.
++
++       <B><FONT COLOR=#0000ff>-t</B></FONT>     When set, the current timestamp will  be  appended  after  <B><FONT COLOR=#ff0000>name</B></FONT>.
++              This  option  implicitely  sets  <B><FONT COLOR=#0000ff>-z</B></FONT> <B><FONT COLOR=#0000ff>1000</B></FONT> (and so always produces
++              filenames like <B><FONT COLOR=#ff0000>name</B></FONT>1234567890.<B><FONT COLOR=#ff0000>###</B></FONT>).
++
+        <B><FONT COLOR=#0000ff>-C</B></FONT> <B><FONT COLOR=#ff0000>#</B></FONT>   When using the -o option above, start a new pcap file  when  the
+               old  one reaches about # times the size of the ring buffer.  The
+               default value is 10 and the default ring buffer size is 100MB so
+@@ -126,11 +136,19 @@
+               into  memory when using it, splitting the output into chunks can
+               be helpful.
+ 
++       <B><FONT COLOR=#0000ff>-G</B></FONT> <B><FONT COLOR=#ff0000>#</B></FONT>   If set, specifies the maximum delay (in seconds) after  which  a
++              new output file is created (same behavior as the equivalent <B><FONT COLOR=#0000ff>tcp-</B></FONT>
++              <B><FONT COLOR=#0000ff>dump</B></FONT> option).
++
+        <B><FONT COLOR=#0000ff>-W</B></FONT> <B><FONT COLOR=#ff0000>#</B></FONT>   Specifies a maximum number of pcap files to create before  over-
+               writing  them.   The  default  is to never overwrite them.  This
+               option allows capturing indefinitely (waiting for a  problem  to
+               occur) with finite disk space.
+ 
++       <B><FONT COLOR=#0000ff>-Z</B></FONT> <B><FONT COLOR=#ff0000>postrotate-command</B></FONT>
++              If  set,  specifies  a command to post-process each capture file
++              after they got rotated.
++
+ <B><FONT COLOR=#0000ff>OTHER</B></FONT> <B><FONT COLOR=#0000ff>OPTIONS</B></FONT>
+        <B><FONT COLOR=#0000ff>-B</B></FONT>     This  option  is  of academic interest only.  It enables code to
+               check before each write whether select(2) thinks the write would
+@@ -207,10 +225,10 @@
+ <B><FONT COLOR=#0000ff>AUTHOR</B></FONT>
+        Written by Corey Satten, corey @ u.washington.edu
+ 
+-       See  <B><FONT COLOR=#0000ff>http://staff.washington.edu/corey/gulp/</B></FONT>  for  more information and
+-       the latest version.
++       See <B><FONT COLOR=#0000ff>http://corey.elsewhere.org/gulp/</B></FONT> for more information and the  lat-
++       est version.
+ 
+-       This manpage corresponds to Gulp version 1.58.
++       This manpage corresponds to Gulp version 1.58-crox.
+ 
+ <B><FONT COLOR=#0000ff>COPYRIGHT</B></FONT>
+        Copyright (C) 2007 University of Washington
+diff -uNba gulp-1.58.amd64/gulpman.pdf gulp-1.58.crox/gulpman.pdf
+--- gulp-1.58.amd64/gulpman.pdf	2008-03-14 21:56:10.000000000 +0100
++++ gulp-1.58.crox/gulpman.pdf	2012-11-15 22:27:12.000000000 +0100
+@@ -3,68 +3,71 @@
+ 5 0 obj
+ <</Length 6 0 R/Filter /FlateDecode>>
+ stream
+-xœZÙÛF}ï¯(t49,î|tÇpØ=îv&w0`S%‰cŠT¸X­`>Áùÿãœ[7ÉÎ$7Éª[w9çÜ[ı;sÎ\úWÿ™ï¯şş6fÛöÊe/ñßöê÷+._`ú|Ï¾»ÇK	ıà~s¥¾ã,öXì~Å#×ñ"v¼zo½|÷ÓíƒÅVì]+š•í…®ãòØz^ï÷YµnÙğÂê·û¯l|ÉSvŸcƒ8iH{øXí§+ëõ³Õ·°	Oyè„©}ï×WÖÏ/V÷ÿ™Xä¹NàÆÌæ=v•!Û¾<°ÏlİÕ&6+/´>å…¨ºòÄ6M½gİN°JtÇUê¤©%Vİ|`Ÿ±«[!m›YdÃ$›GN"-¸û×ë7·w¯î”©¶C¾"m»/ŒäN í¿øÌñ}×MôCÛŞ‰³oc'Ôÿ«pW?
+-†'onï_½y}7ÿ2àç®§_ùmÜØ‹û¾“°;q"ùÎ÷/î¿}%×š/5Îu¢$$/[o*–±öÔvbÏE·cYÇJ‘µƒ_ñµïpzñƒëbsÄú9=Sqœ$¹~pû®eˆËëF´«›¹£"¼ÌóòËsãyd“‘J…cQ–ìĞÔÙ#‚¿nêÛ¬8åeYYÃ6Ù¿¥¡u;dùùØMKt-2%«&!‹ ö?0êòÃºß/¬±ıÔw¢ˆ^ƒ¯¥×;Q±<;t=’s«²Q ¤#C‘°cStô¤«Ùºh?Ü°¬,kZİã±ÃãÀœûÃ	i8nßç;¶+¶;sJn×óq½£`MÖ‰Ö9;­œ|Í·şèû]ÖÒc; ´‰&‰jƒ¨¸²Ç¢,º¢ÙGiD~^~Ü••÷¸òÈå±oõ¸ÌÏåcö|*³Ü€¥—¤‰©¬ê0fŞğSóQq Õ}wÀêrÿR.ƒ-\¹E‚L%m3ıHí:ş¸…ë¨¬²òËÆÍİQššW”¬Ã¡,ò¬+êŠr¨©ûínĞØÔM\ãÔsÌ€QA3`³â,–)Âæ9êéË²<ûÇ¶Ëª®Èğ‚hğ5€8¬ØãõÙA}7qÒ¹›İsï¡üÎGô½x‚w…_«ÙĞáˆ“ñ\ê)×õ­hÙsÂƒo\›ß°bÃNuÏğãùò„+¾)ˆ¿ZŞ’ş8Q••¶›‡Ix¤Şæ§ù(Ø~p‘M:‚Œ1˜bB8Á<iö47Çß7}C¥-·ñRÀõ„%ÎCàùN<d-Œ	"cÁ$³F˜šwÂ@Sï$¶'”°•jßz¢4,¨ğš¾ªdtšzÛdû–Õ•vµg¿–0¾À2;æÆ‰]Ö~hE·ğsê»Ã T6))µ¬İÕd	S2SU¸Eç‡înë½ „ÖS¶?”H…G Ô˜©P¹N¬-::Ú‡	=°å“!)áÄH‘Õ}ÍŠÑ‰á”xÎã€ÈF†7QĞz	Ä¡˜q—n­:ÑdyWÌ—I'á¤¯›©~;xzÑ B©‚| KD„ÜIÇµ‡©ibòÁ"ĞÇ G<@-¯	4 áÁ¬~ .ñ¾şAgI¨ù³ow¬ 9J
+-{¤÷ã9`J±ßĞÂ·AÚlt(ä¢CÙµ¬ª;‰bÈüJ6»ÀìT—Ÿu²Å $¢QÜQêŠ¡QÒÄ$%iVäuµvVvQ¤õj#®³.“ÇÆÛ9¨ØrÃè”
+-5ñ“²ØVò4dÒ¨º  ß‡~gØè!ü—8èqŒŒzÅ5–+¨(ëtW÷Õ:k
+-l†ªUpúN‹Z¨]±ï÷à“”¥Âöb¥góyYp7 fÔ.tSlı`ëB…,°L¿*¼á1¨\Ìs§{™E<9s
+-<[y7¬ªPØÊ!ª¢!i9}{T¥Õô‡î†RG†¬í á>•¥Ì€Yò@Aì³ğ½LC­6¼€Ô†\’ÒQcfÈ­'ìÔƒ3K“­Ÿª¢İ	%Ílårñò¼dNÏdÈq‡\›3+ˆu”áÆ7áyò4#@À‘kÈè¾Ï
+-èïúÀ±ı˜84O-ıŒ.±œW“}!p×¦öE~ğÉ¾ØìKû°¢Eá5+¤”Ëá´-Q ~F´×e¤f7‚;S>";tÊAT¥°íGP4“‹&,€Jõ&I<kz.ôaŸ×gMŒN® Õ8ò½€0†\"X4sú¡ÔşR+fìyÑæ5»~Qï®Ù[±¯)w·+@Í³×ì¶nºkô//ŞâGtvâ$0ªÒ£Ä’)òìõÃÊawXlB æÔÚ,) ØL!j%uG–iÎÿT¢6$U"›#äíÒ¯…â$»«ám#®¥Øi»¦8€î7:2i(‰…¸=n’só|
+-_i8‹ôÀË·/Øb^4Ô©….”FGÚ¨é†€b´ì#¿a¬	ˆòã`ësAXxæX2UèèhRÖ–%«7 ı¼§A:p­Îk{sMµ+Õº§I6ö¤T[üHÔÉá|TŠM';ôHâ°:6|!wSìóær
+-ñTï"/6'Ò–831ÁW©3bÑWL†(9ìCoFØ.ğ¼åÒûìíCºwÓ—dw+J4QlB¹|¯¨“ÖV…j"ÌÓË©ŞH½Á½x"-ÉÀ«Ø¨°ø¡»ÁÛ@›U$ÛLj,«ŒÓú£zrõaĞĞ³ZJ Û«F1Rf¶&rä/ÇC·n&lK;Å“]c­‹óşSaÑ]àØãªQNj\ÕZÔ—„p{’ör€¤ŞVS$%öYÛj6àÔ!Çş9`Ù=ûÔĞLäb˜ºâ"çNH•Š¸£áÁp¹8äÌµy:‘?Íâb18"PWİî›³ÎÉå“–VÉõ‹Ó³‚˜šF+P¡bèû)OI”…”uOŠş4f²Sm—=ÊŞFëøÙ4šrCRÈ*2èãĞbde/ t'p­ESW„xƒ¶á²‰3Nm
+-F‰§ÈÅS%ÂQ-DtÔ‚ıíù³Û¿úA³º”}aR÷ŒŸMpêsbÜÙ¾RÉKR³#”"O"ãJ
+-ãõrƒèrÒ¥ *<"{¦•šè½u­ü($'mEÿËá…êzÔV~ä$c— #%GJˆíPNˆÛµŒZ;¢™F"@±®U'D'ÑB«W S:¬@!w]‹`\6Ã$s	›İ8Rè˜½fk5 ËXYÌÕ6–vâxÎ¦÷Ê§odMµ»o÷z$vâ</´ş¤¶_J9vÊN€ÆÑ“²i–eI;vaËšñğ¥‡ºöü0i–Ğ¤Ñ¸ Sék•~$´ÚâAø\±ı|lÆ¨nÇ‰ÔlhÉ¦Ótí°_µNÍõ´#Q<Zùpô(CÉ¡¢ÙS·¶¾QM•.a.NKØæ)ÒŸÇKVç®ûówÓœÓØ?…ïPƒQj7SË¥–ÂS*vğ"µR
+-±cß»#­kööÙÏgQM|µá$²ù—”aœ*©òcÌÎëƒª>/UˆÊŠŒÃO“ u?6h  VíHBíWâLÛ%CœexL¹­©âğ?ÄX¶ÍÖuõ­1&QœNC*ÓìtÓŞ!@™ñ¡w 
+-Œ—N”íd
+-«€“`œhFî%±2ÜÃ×N!eJ?™lÇškÁ‡]ÔÏËN*ò­“êÓ³G:m'‡T³éÍ	)xìDØä;=jN6ïÇ]ôÖÙ¬ ;˜Ñ@aĞ¹òÊ.´ü6új¡'¢²"™Ş0åÒ” Ío–,5aƒùY¥æhÙ8ç]Ò°ìD†ŒkÏ±ÄMæX2œo*“ŞñvZâ‰Jr£æı¡æÁ_n¢Ğ8ûo+@â®¦[šjÛí$¡t}ë»ÓPÒ!X„JúÙOã·Nœë%B½èÚYLëÑuÆÃ´è‡Z³—›j‘Œ§išyºK„„JL6Ÿ¦=éx2K=Ô‡Ñ0®ú¬€vB N7SÂ¸Úøzh@¼tLdÏèy°ÉUz+ÕºT”š]Ó£¤&Ù™±í’¾ä¥ç²İÃUNõkèO&‚¡R URÉ˜Xê¦æ†wE¾CN¯{üİ<e“Í#d‹?d²UOÆûœ†‹«¡&OÁ ˆƒÚ)©O›°õõk‰æ>Á•[,ÛP4²0Õ‡¾ö”Hèªİ'uòô%d|Åbï¤œWğ¯/Añ;H«I~,2Õ|ÑÕfdZ*ë)/Ñq,‡í#—#ƒôêÀIP ªÆNÆ€}ÑóÊSÊ	J	D¦®Ê“”?"w! ‹›¡õåëKî¥¦Y4·…zho¨Óö)¹Òù˜ĞRHd¶Vå™•$ä†©¿äÕé úÕ5Wê§ıìÄcc@ˆÓÑÀí€pëÛ§qxŠ›Neô+ÏqĞsÇçÓÿz9ÆÖ›2t@ÆanÅI-«RhšbMì¢N0"ö_˜C”G‡áÙV4£}€ô_Ü…Ä(ó'öH¢óÂ~XM´Í•†¢BHôÌÛ—mg˜útäLv’¥)“Æ¹[8Ïf{Swï;³­#ãÜ/ef‚|½¯ÌÿCèÚa"(CNĞg„´j˜AÚ”ú^ûÆ|r÷íÆ
+-”wu¹¦KÉ]Fø*Gár KÖ…¹<ø¿KÖ×«Î#
+-M$Ã;fgls²÷±©%_Fw0¾—h¸½Q÷cÇ(cÎÒlXYÊUhĞ„>X4YĞS]UHuği8œÜR7åà“eÓÒ?¶„\hM3hëıA§¶ò÷ Ì8šW{bN2PïÁ€LşE?„ÑLdË¬&IÙç¹kê~–uÊd:_ıüñr¾·nÁG¹CD_mL?uè±$rù©èÎ$ù\ıÂ†Î¶³(QçÔ;4Ğ¤Î†ıÚÒ¨æHè *² 8øœ~#xEƒ'I€ÙòÊ½d4'k÷¬io…ı¹´êE.¤¾xÒ¿ƒô*ÄFwÉj:êä@%Ù Çº¬ë[ÖÖÔ¤b‘¶h;}$ñ­‹-ìŞÔú×?8)+>Ğ!Tf	˜OúWn X©´„2çfr_èMêC¿.Á5Gf[<»WL¡UÄl§Œ*ZÕ<ôûG}»í¡¼xRó‰ 8d@±ÏJu¢aÜ–å]æu_É ¬ÛÉlNá:Lºø`M[Ğ½¡üêb!FÚ&’C%œ_Nİß•İ‘L¦<õì7C|wpÌxìá.N“q
+-ä›)P£8>ï›F–+¾ÏäİÜäú	Ylf_¾~ê»¢,şĞ-ƒù$2By•
+-k3È–Ã9È6É®h+„¾B÷|
+-4’,Ğ¿¦J]R4w\5ã	á%Ó,üòJÅò	]¨élÉ!Û‹û«àßÿ|u~£endstream
++xœZkoÜÆı®_1P
++„hYßüè¸Šá ±UKNSDAAqgwYsI†¯·èOP~ŠÿcÏ_»vš p,’sgîãœsïèwæØœ9ô¯ş3;\ıõ]Äví•Ã^á¿İÕïW\¾ÀôÙ}÷€—búÁÃöJ}ÇYä²È÷ÙÃáŠ‡í†ìáxõ«õêıw\±÷­hVk7pl‡GÖËêpHËMË†V¿=üpµÆ—<a$0`'Ùğ°ÚWÖ›«o±'<å$ì>l®¬ŸnWÿìÈulß‰Øš»ôØQÙõEÍ>³M“—˜Ø®ÜÀzÎrQvÅ‰m›êÀº½`¥è«ÄN7Œ­ªùÀ±¯Z!÷6ÛÑ[ZóĞåîÿùæíİıë{µDïC¾"÷ ­/6Ém_ïÿ×Åg¶ç9N¬®×{qömdúñÕîèGşğäíİÃë·oîç_úÜæÜqõ+¿†Í±¸çÙ±}Çv(ßùÛíıËw¯åZó¥ÆÓ9väeëmÉRÖÚNØ1ïö,íX!Ò¶cğ+¾ölNo"~p]dX½¤g*®¾×îŞ·ìq`YÕˆöqu3wTˆ—¹o^~uîb<ÍsÚ¤¯Rá˜«›ê)}Bğ7MU³íŠS^ú¡•6l+ø[XGÑ°:Í>ÈÇN[¢k‘)i9ÉY‘k{¾9P—Õ›ş°ØÍÚK<;ùè5øZzí¸%ËÒºë‘œ;•éØ Š„›¼£']Å6yûá†¥EQÑê.lùæ„ÜNHëÀq‡>Û³}¾Û›sPr;®‡sh‹‚5i'Zûì@´rü5ßz£ï÷iK×>¥M8IŒ@oˆŠ+}Ê‹¼;Ñ)‘np”FdçåÇYyO+—\yVß1aÀËìq>fÏG¡2ËñéQb»q›Ê*ë1³ğ†—˜òš<Tõ]Õ¥ıB.4Ã‚©¤]ª)ë‰í&[e••X:Cv‡Ib^Q^°êºÈ³´Ë«’r¨©úİ~Ğ0êÄqê9fÀ¿¨ °YOqËaóGõôEÇrYıSÛ¥e—§xA4ø@œ	–ğúì ÛÉÜÍÎ¹ÀP[~ç!ún4ÁûÏˆÂ
++ı¯Õl`sÄÉx.q•ëúV´ì%áÁ7Îšß°|ËNUÏğãùò„+)ˆ?[Ş’ş¨óZy)d¥íç¡F@bª·¹íêÍ|ì08ƒÈ&AÆl˜bB8Á\¹í¹İßö•¶4ã&€ë	Kœ‡ÀõìhÈZlÆÍ&™ƒ0‚Ä¼øšz'±}:¡„€­TûÖ'JÃœ
++¯éËRÖA'ñ¡©vMzhYUjW»ë7ÆØ@Û¸qb—¶ZÑ-üœØşdß¨=))¶¬İWd	S%2SU¸†¶ëîn«ƒ Ö§ôPH…' Ô˜ªP9v¤wt´µcz°–O†¤„CEVËG'Sâ9"ŞDAë%‡|Æ]^`¸µìD“f]>_&™„“¾n¦ğâ`°àj¢­B©‚| KHÜNÆµõtIlòÁ"ĞÇ G4@-¯	4 áÁ¬.q¿ş¾gI¨ù£o÷,9J
++{¢÷£9`J±ßÒbÂ·AÚl‘t(ä¼CÙµ¬¬:‰bÈüJ{v€Ù‰.?ë´Vƒ’GqG©o(†,£¤‰I
++Ò­Èªrc¯ÖDŸ¸Öë­|¸I»Tog "`Ë£S*ÔÄOŠ|WÊÓĞ†n@Õyô[0ÃFá¿ÄAOcdÔ+Ù¹‚Š¢Ê@wU_nÒ&‡1T­‚ÓÀ³ƒÈ_ÔBUwù¡?€OR–
++Û”ÍæeÁŸ˜Q»Ğ¶²ÖF°şTÈ«Àä«ÀƒÊÅ<×y±7™qQÈã3¡ÀÓ•‚q“Ğ*sy …­¢*’–Ó·GUZM_w7”:2dm÷\2fIÈ}±_ÌÂ_ejµáú¤6ä’”3n}‚¥œY˜l}.óv/”4[+—»ˆ—ëÆsz¦÷Èµ9³‚XGn|œ'O3Ü:†Œ€î‡4‡Ğù®ìjÛIÓÉí©Å# ŸÑ%–ızb7ö†pm»Á.òƒOìÂØ—ì°¼Eá5+¤”Ãá´Q ~F´×¥ä6Œ5‚;S>"=tÊíATæ…X¯Ÿ@uĞLFd,š0*Õ$ñ¬é¹Ğ‡}Şœ51:¹üDãÈß„1äÁâ ™ãÀ¤ö—Z1e/ó6«Øõm9¼»aïÄ¡¦Üß­ 5/Ş°»ªé®Ñ¿Ü¾ÃèìÄ‰oT¥K‰%SäÅ›Ç•Íî±:íÍ€š#PëmI]Ã˜BÔJâŒ,	$Òœÿ\ 6$U"›Cämé×Bq„]ƒÕğÇ®×Rì´]“× û­LHbá n—›äÜ¾œÂWÄ"=ğêİ-ÛCÌ‹†:µÀÒè¨S5}m(BË>ò›Dš€(?êµ>„…k%S…&eccù×²z}ĞïÀ{¡7ªá¼^o¯©v¥úB÷4ÉÆ”j‹	’:ü‚
++±ídG‚©CRg_HkcŠ}Ş^N!>ê}-²|{"m‰£1|•¸ 1#=Åäø`ˆ’ÍP0ôfs¾ë.—>¤'hÒ½Û¾ }·¢@É&”ËŠ:imUh &4Á<½šêdĞ|Ğˆ'ÒB|´ò­
++‹Ø‘3¼´YP…O²Í¤Æ²Ê8­?ª'G=«¤ °½°j!efk"'@şr<tqqëfÂ¶d)šX´.ÎRøO…EwcO¨F9©qU7ş~bQ7^ÂHÚË’z[M‘”Ø¯Ó¶ÕlÀ©C¼s6À²öÜĞLäb˜Œºâ"çNH•Š¸£áÁp¹8dÏ]s?±CošÅùbpD :®,ºı7g“Ã'-­“ë§g915V BÅĞ÷S’((}ëüi>Le§Ú.{”½ë»ãgÓ4jÊI!«hC‡#-z c8¾c}Ì›ª$4Àd†Ë&Î8µÉ5Å®"W•GµPÑQö——/îşõú{ÍêRöHİ5|1ÁM¨ÏÉæneûJ%/Im¢yWR¯—ÓD‡”“.Uá!ígZ	é€~µ®Ó•ã¤­è9¼P^ÚÊíxìt¤äH	±Ê	q»–QkG4ÓHCC(Öêdıò$\hÕ¼¤ñ
++dJ‡(äcŒËf˜d.a³ÅP
++[oØFÀRVäsµ¥í(„³é½²éÀÅYSYWã­±óŞŒÄNœçÖÔöK‰"ÇNééĞ8zR6Í²l iÇ.lY3í¾tQ×Ş‚&ÍšÔ!d*}­Ò„V›ÿG>—ì0[@Ã1ª»q"5ZA²éÅ4]ÛìgC­ÓíºÚ‘(­|8ú”¡äPÑ¨[ÛÜ¨¦J—0§%¼æ	ÒŸGKVçóÓw6ÓœÑØ?™…¯®@‰(µ›©ÀåR‹ùKá);x‘Z)…Ø‘gİ‘Ö{÷â§³¨Æ28‰lö%e%JªüĞ³³ªVÕç&‘êQY¡qøi2D£îE Ôª‰©£ıJœÉ\<ÄY†Ç”Û&—*ÿCŒµ^³MU~k6+N§!•ivºiïà£ÌøĞ; …GÆK&Êv2…UÀI0N4#mI¬wÃğµSH™PçãM&Û‘æZğ!dõó²“
++=ë¤úôô‰Aæäª#p6½9!ìæI±3Ñ£ædó~ÜAo=‘Íjc'ƒ-D~8Pt®|‡²-ÿ}µĞQY‘ÀLw˜riJ€€ç7K–š°aûi©æhé8ç]Ò°ìD†ŒkÏ±Ä‰çX2œo*“ŞñnZâ±Jr£æ½¡æÁ_N¬Ğ8ûoK@â¾¢[šr×í%¡t<ë»ÓPÒX„JúÙOã·Nœë%B½èÆ^LëÑuFÃ´èûJ³—“h‘æ§iš¹ºK„„ŠM¶ÏÓt<™¥ÆêÃp×}–O–¨ÓÍ”0|®6¾Â7Ù5:Glr„ŞJµ.%¥f×ôè©	Dv¦l·¤/yé¹l÷£àBÃ_Sıx“‰` '‚(C•T2&–º©¹aÇ}í‘Ó›7gÙ´æ!²Å2Ùª&ã}NÃ¿EƒÕP“'`ÄAí”Ô§MØæú†µDsÏØÊ-–n©Y˜êC_ûNJ$p”õI|™!>?äµÉÒØçšx²½È>¨öoê-q™IWÈÛ’İš«¶A®*şÀg¼1/àO_¢ŒĞSôú^öŠ—ôíL#~›v`ïyªºBºsM¯g}Ê
++´BË[€Qd µõê ·I¶@í-–Ù ì¢×¾È[™«ğIU'©Ë4v-.Q`)7ÓôË÷ªÜMLk®1õm‚áôµGYŸÌç—–‚HcZáFZÂ®#$áO'SÖ¹ë?f';"gœ&5òP_‹S]l:•Ò4G=h×‰mOcüËå[o?ÊĞ²‡'¯j´iòÑ
++°ïÛşH%`n!¼à(ÎLÑğø=Éâê. ª›_a#Ïçq5-4Ôä#ª!ÑÃxOkJïtëä$«$T[Ràë4f¿˜Ù¦±ƒ3ZÈg¦CãÜ/e¦@¸_¹˜ ¸x!'L6
++_uòP”úÂ	v#>¹”w"ÅûªØĞmé>%à—3z9¨Ğ%ë`»Üÿ¿KÖÓ«Î#
++±îÇÃ;Æ2La»ÙûÔT’ÈC„Ûß‹5Ü¨‹»c”1“p¹mì²«Ğ?|´hä¡Ç+ºªê ú`8¹¥®ğóÄËnªj	¹Ğ3§ı‡ZNÍvòÌœb\{bÎ~h+ü™¼‹~Â™ú—YMZ·Ï2!6Ô–-ë”Ûñtğûùã—HâDÙ™ËM4üf«¢‘sQâ4=/E.Ê»?ÁüŸÙ§áŸ3“cÅêœúÆ‰&­4iÚ²_Zb#¡ƒ(iúƒààsúUàMÄL$fË»`4¹á\E8gõL¶ö7æ6­;æ™T¶úFLÿjÒ+[İ¾«áì(à}•dƒNìÒ®oY_o¨{Æ"mŞvúH4{Üä;ì{[éßKá$ùø@‡ÜW™}$`>éß‚’ö¥ôÊ`üe ÉE¦;©ıº×i˜î >ØƒbŠ=ÔX ÆœÚTŞª®¦?<ékwåF“š2Æi OòCZ¨sÀ4ëzü0«úR¶*EÕN††r>ØÑÄÔÁÿ‚.4åïQ{•“™PN»p~y`{lÛ<2~ªf¿²â9ƒcÆcë{Ğ@¶ŠkŒ…#	Ûå°iz‚ å¨ùH>¡{£-9K»}¸ú;şıÊõvLendstream
+ endobj
+ 6 0 obj
+-4117
++4089
+ endobj
+ 14 0 obj
+ <</Length 15 0 R/Filter /FlateDecode>>
+ stream
+-xœÕZÙÔH}¯¯ÁC;%ÒØá½Z‚ÓCİÔ@¡î5Ngd¥/‰²ª5ŸÀ¯ğsnl^Š¢Gó6B¨
+-;q×sÏ½ÁGæ¹>óèşYÔOß$ì¦¿ğØOø{sññÂ—˜şQÔìù¥ôàêp¡¾óYÂY†ìª¾ğcÏå1»:_¼w~z÷êòÚñ¯7ì]/ºÍ–Gëù‰óc[×y³ï™]°ùçÕÏØdàÓ=Æ÷Î¹l8
+-öhsõ/šéCƒÌõRÆRçÔ³/·´€»»*fÂqîÆ‘^õ¨ %-ğ}‘eú……];mÇÄÇ±¤e[¨ ÷ŠS7ìIŸr»Gæúi–†úE%šázãÊO}è%lëãS©ŠòLªóò •é‡®lnX{`¿÷¬ìÙĞ¶¬?¶İ€ßØ±­örUÙÚ®Î‡²mX¾kµT¾”Š¡›¥©‘J(å3:†$ã3Éäµ•™“`©Væ=ôìÓÆÈ‘#º]Û“pù0ö¬*A²»rD#½³åqè¦QÕ¸R,K3åg›}Şí™è:X²lúAädÖ¼ê[6œËB<íEÑ6{2Ô6ÊR7Í2ç
+-ª~îúÕb8¶{:óÔµ»|Wİ±š${q+2M[ùVJBç¿Âù¤a{)¯ğEqÅ‹U-,\ä§aìDÏÈ¿Òòò|v.«Ší„ÚO6ßÍLnÓz÷ÍÚ”ğ8;ËJ0¹&BğE‘)’ŒKÉnO¢+k¬%CéÆ€G.÷2kG¥ƒä¢ñÄr#¹»{ÊVÎ—“zë{&7‰=®%|¬ŞÎRYjä‹½TyîíIåáNšg8vä²S[U$IÙ¢û´áˆµÌãğ#œY6¬.‹®U–ìÉ•äí£4vWOÎ¥-E÷”Itúˆ^ÁrDü—‘¸~x°6Ş.2qdÈæÄMçb€¨O¿’ç)Ùåô>rQ*îE#u–©¸“ÌÜ 
+-*Œz–Îx©É˜4€¼ˆÇê©¨OÃ;o2dADN^J÷!i±o.s¹8æÍœ¸Cî¦^ê\jË^;Be”:lHø"êfª-"ï0©Ÿ"¡õ‹à…@«î€¶ˆih!r”@Õ$l üR·pIÃHWi¨(u‹r´Ê—Ër•ıX#‡Êºy?v23rRZI‚„nä™¤9wsã‡¡ŞW¯Æ¾¢oÇ®½Ë ´#‰¹AÙ½*B»8Î²•Pï|¬†¯Ä&üâ{Ûš İÔÊÜÄ³¨å˜¸ıVj}\&O`#ÛóB7ãéhBn|zìCˆ®s{Bëq˜—„,¸"
+-.[;!CáåêˆL¸ïOg+´»¦BR6'¥›v`‡®­U¹¨Y”IlÊúóOpêä °ÀÓõ
+-~`s¶Ï‡\"¦Š(Ø(Ig•f
+-è §UÛ$ŞK¬,B5Ğópb}®ªQ©ÀÇÊ¨T–”Qˆ!vŸÂ¯×Æ{?^ì†¸¥ÙÌPı°hÁPy1Œ²HäZ ‹Ÿ.@ø½ó¹‚Ötº9ØEeXÖc~:AÅ|ZªÎm¹‰#ÇÕæÁ˜úc×|n–5\S2XN¨¬lĞFî— ÊvU[|èË?T¹ğÀlû¬Q‰šĞ1<›SÎİi°¾Z¦YÑA}7›>‚§À\†óbßÀ§ü·Œj7‡¨iO1œLzY,KrE0‘´ª­ùpòë¿)"…ĞwÃ4^yèå€2.j¢M2"ªòæ8² äà‘ó¹Õ”ª¼Ûø©sC&meÂŒÆâ·„•^E0Ş´¤ciŸ 5>1:]«£ò¸›EÒé!0)ÉfÿñÙåÕ»7/Ø•¶X A=Æoq¤qÅyı—Éb‰›…I¢_¼|õ‚½¾¼zùú×·+À
+-qŒÖ¾´÷é€1ü¾ìî±	B[o–‰b@qı0! m‰ ráe¼,¡ªÍÔmw·:š)™cqx¤šÓsøwBxÇ½\”KdHy ¡mM^‹ıÒòbô$ÿZ" ïŒ=^¥Û6HÑx×  ²N¬v¡0Ÿ¥ìz‰¥ši€w0*(•'Šû¢<O¦e d™2š¦™-—‰fQ-;M¦¡Ö'3¥RIh?q#XaI#î“WH–hŞ,©Ë¾8–âğDe„ñ(«G ¹@{àÜ–ø<’ï4o¡Ôô½%x:”lÈa ’¢“`îëÆFâèOcubåAÿìísĞŞ±ÜÿY=şqÛÑÜßkì„¯Ó‰Í„”½ï7ªLcO‡’t[4§¯vW>6H’haEtW
+-VİU?3qE¶š“Ï‘6Íòã€“ÍšóÌ«èk´Šø©–ROØ6’K£Ã1ã1Jbfƒ"Q0W‚*§  ¨´e9ñİ€û™)Á¨Ë’Mñ„ª±ts¬v((°g]°{5ÉºqšØ=4¤JB”¥
+-R?É­B„­›øó€oŠËU£PÌÍöhvƒ$PÌITÈŞâÛ,Jª«èà/Ï	êwwªd„AÖ>ğÌ(HÂÙONèsÓµŠš{´
+-NÜ4˜ô?°,˜$sÚ\J¬úîyih°#}GTÂíÄÊ–	ÚWÜƒa#(í<P&ÊOÂê6NuëjˆmQÄP…2çmÙ(’m-¨ÄŞtyİëPÕƒ)ƒAU°Èl‹zVˆf 
+-A-jÂ†ó”J%ŒÔŸªR5¯2Xg…£8Ê­foGQ@n¿ê¿­S=uhiQ)SQ¾Oé3¥«óÛ²kÖŒõN‘–É™$%ò¤<°š¯õÂ?Ñ÷NGˆ§Õ®©Í*FY"Û^Æaf©ÅĞš„mã°Y‚ø²“5½ Où}øéVÀ¾4µQÉíI/£¦SüH‹¸# >d5ØXU-(•Êçs¯j:°Ÿ|î…j©xx€ÌÎÑ}äÔç’éU¢Ö±m–É™„ ¦ñª¢ĞüO‚ÂÔ@ å…0%3T©²d_²Ù5±ôúj7Aš„úë‹7_gU@şØ&ğåù×AÅ9Ò#ÉXôÛ}F¾èAU*P;Û¦’«¯¨ë?2Qí¾¤w¡$–…{‘qâ09QW˜M¨ˆo¨äÂ1héÕÌ&`:ª©\hŒ”…›;U( [|ÖÃ…©®‚8ŞµÃ¯74˜¡Ì•Í˜Ú@b%,pÛ–„©ÂÊvD’ÔZõ­4u°-Õİ••aˆØN;ˆ,ÂxVÉ‚ÓBqûÀ0®ú' " VfUX+mñD×ß4Q&\ØŞ´?ç¬z†s“º½Ò—'¨‘æ9i©ZGJ”É€Î1_%0MÚlÄ<4}÷¬/J Y¶$åÔüO³‰ ê/èìµÔ"˜·ôzAU6ã­ìÖÑ’Ò˜íØêù- /„ÁcÆs5ïÎRnE#Ó³R$ÎöÌC®ä¾mèx•h™ç¡³Â³(ªxKRJç~…Nu"ìM´;ù¥9œloÈ™*ìA†€Ë’9ñ	À©–Aæ6öàM?¡¡À];²Syó‚ÕVı»É;³1a:‹NªÅÍÔc×7G ä`ÒÏ–eMc¥uK¨›mÌ¤eÑUD©íäÄ w@r×ç«îxòi&U”#ÊŒÇé"M¿9ªøÇC¨Ç=ÿ@=ù¡^(QKÃŞo“¯SwÊ}Ç’ K¢IŒ‚È'	ø
+-r)QnE×‰=CgUVópTÕ%@UÍÖ÷yT©«#4xÉDĞç $š]5ßÍ>"P19ìæÌ§K*Ëz½]„ÿdû¿?ûåòÕ‹·÷<0]º$zúR5èÑˆ·Çs›×'ª;Q­F)¨UşO¹ñŒ¦oQ"gÓF}qzQUå©‡Ÿ¯Uì†`ß¶mq]Wq•0ñ—8¾T¯¹Ştsùeóä@¸ÏE'±,Ì¸ÿJ,6§j8¡Êİbv¦v×\k0ëÌI7eA1°¿”æµ ¼´5=îÜš¹ŠK?"ó=ºF±cÛ‹iÚ6ÄF³"q˜Hü²ei¹«a„y?]!*qé1>‚ÑŸH1]… lP£j{•†l(Nû±>Ù2ó±B_)}¯)öĞÂ½w®jÌ·…~¶İ9àÉÕÍŸôÔ“h½˜š:bì Ä‘w‡0*ò¾½"Kd€Qy©©2sAq¢RlÊ£Ê¶\‡]æ†æ@z¹“Ÿ¹É”«Û3ÛŞo)Ò)3uØÚËc»§üûfÆ;ĞÖúa=!ÄÅ‹AÔçJ¬ÜëCÓ$›î#:š‹PEZñˆ€ov+cXÄt¡M£©uUAB…g8¢áâOhÈbãúkéã–ævrNŠŒ£9é—ïúu=õÅ9äı‡Q•9{Ğ/Pvš²ıÿy†û„TS ê¬{D1Y‰=öø4QÀö˜«Ë>m —ÎMçÒ¶…ĞõgÊ7³5¥>¯e¢¬PÓ5rğæÃ3ö®CùìåŞø¤MuèRPdQdƒ0Ç9ÈÔ¾“ˆ
+-Ö>èbæ¿÷ñÁüßÉÇ4¸öøŸøx*~˜MÚ§]b×²ÀÒİƒ?ƒ“÷N ›kõe:ìşÕÍ0/Ş¼½Üd½.óÙ¯ì Ä^®ëóÕm­¹á}ÍJi¸ÎKGŞ„÷4Ğlğ{ELÀnèn-Shi&ƒ•FAIN=£åÏHfîy‰|¢S°vN^\]üş„•Sendstream
++xœZÛrÜÆ}çWLÙÆV‰fpÏ›å’%v¤HtÙ‰˜;ËE„Ë-©oĞ¯èszn¸”«R*Y»ƒ™îÓ§O7ø|Îúg~–ÍÅó·)».öşß^üqÁÕf~”{q…E}pu¸ĞÏq–
++–F»j.xø"aWç‹÷ŞO¿şüæÚã×;öë ûİ¥ˆ?à©÷C×4E»˜[°ûÏÕß.°ÉeˆG÷ÜcA{xE/Ùx”¬œú^¶#Ãc¬)îªfjX_µ·ìfwõßs?Åã=ìMú,óƒ,2ıÙ{ï {6U]}*ÆªkıİeÆ¾bï
++ÛO§}1Ê=+úÇƒAšy·SC£:¦,Zv#Ù e«l½äqîg0ò’: PÖ«ñ¨Ìı†,xş67n
++s2†ûNûrG„³«ráN!ü$6«¾)iI@8‡ÛòÜ|¡Ç®½®gò©¢e—pºÚ+Éü$t'},Ü¹Ï³<‹Ì5®v½óÕ£Q‰S\ª«ø‘ÈÕu^ÔeŒºû}`ÕÀÆ®cÃ±ëGüÆ]½W«ªöĞõr.+n:cWV‰0òó,³VI}ùœ!ËÄÂ²gEãldXÆm;`áãÇäŒØ“ıM7qÅ8¬®ZI¶ûjmŒD!F‰‹lÈ52a8l÷E¿g²ïáÉªFY[‹zèØx®Jù|e×îÉQ—qùY+´|î‡‘5r<v{:óÔw7ÅM}Ï²päaªÉ5]Y—Ê:ÿgœ‹P9v€“ŠO”GY~`ğXİ)Æ©—ƒB¹ò¼:Ÿ«º&ô©ıñÉî»…k“Ğ“påÚà¡[ÛŠÀ|>VµdjMğÅ±ÁY¦óíî$ûŠ€O‡*Œ¡ LÉ×Xä¨M'VXËı5ì)›¬¼/'ı-,y„~š6k¿Õß.RA„yfíKÉ*rïN²¬÷Ê=ã±§ºº&Kªv”ıÇ Öò@ fÕ²¦*ûN{r PR@¶³dŞ]‚K[Êş9	”¡Ô¬ â¸:HñN
++Bs>¾\eâe˜#›Së4“‹!PŸ=’ç9ÙÕz\T÷²UwIÆaşg¤{Çú¹lNã=;ïrdAÆ^Q©ğ!i±o¡r¹<í­$jŒ„Ÿ™÷ÆxöÚ“:£ê²Á®Fİâj+äæ«!¦HhóEòĞê{Ô`Z-B¦3©ú¡KÓ!$-;"]•£âÌËÑ*îŠÂ<€¹¤¦‘Å0õ*3†r2ZI†D~Ø¤9÷KçG‘Ù×¬Æ¾rè¦¾”ƒÏ Z‹—&Â²ì^ª+âvI’ç£Ş{ÅT`qáAÀ· —–µr?ky·_K­?ÖÉ:dAdòf:@-`È§9Œè[w ¶Æ%¸e!qô4¸¶n¤‚àåD¦‚óùlÍv×THªö„Cpé¶Ù¡ï°F]­ªDeR—ò¡yü#‚:(-ˆl{„¦ŸgØœ¡Š15¢à£4[ *Ë5ÑNën J|XyŒj©çéÄú\×£R‡µS©,i§:½P$à7çË½¡Ÿ ñ£™Ü²|á¨aÜƒ´à¨¢'U$
++s0ÏV$üŞû\ãÖtº=ØEeXÕcq:áŠÅ4vTKÚr—ÄoT×“˜ú´¥k±tË–®©
++Y.'
++Ô^¶l€Qø©²›º+?Õ'].xÁÚm¿ou¢¦´bŒÀå”wZ1,×ËŒ*Z0(÷óù!D
++Êe<¯ö9å¿ST7KŠš÷”ãzEA¨’œÄ1\¤¼êj>‚üúïZHú~”%›½I56$›"êêö8Z± æ±÷¹TÕ´ƒj%C½[Ê0å+3bÇßŠVcÑxÛY’N” ¡ıÔŞñì»;êˆûy¬‚“Ò|ø¾sõëÛ—ìÊx,T¤à·$6¼â½şqöXêçQšš/^ıü’½~sõêõ?Şm+Â1<­}éÊëø}Õ?P3/D[o%–ÉrDq†ü°Ñv$HP¹ğe¢,¡ªÍô]¿9Z„¹cux¬ZÊsÄwfxÏ³*NÈ1ê@+ÛÚ¢‘ûµ7räÿ¬èÉş­E`ß…6úv“n—a† p¼ê ‘õr³Á|‘²Û]7Nj¥aÜÃ©T÷e7µød:Ù–”eËh–å®\¦FEuì4»†ZŸÜ–Jm¡cüÔá…µŒx(^aYjt;²¤©†òXÉÃ36¢¬™ÀæíwWá7èxX~ct¥&²M·†dCƒ´œ„rïY?µŠGšê«æçà>‡ìªıŸÕãö«R— ñ¸Úµá´¼Y’h9G~¾–·cg«âÛ7ò¹;÷½g›œîàè„*˜dS
++²İÁtf‚së	‘+oŒOª“TCî7*Âğì³U¯?¢›“Ë$UÊöÔ§Œ_¦‰º(Üø:?Í7]6¥ñlşÕ²pp‡U²Nã™$wR\R5§º*ÁÑTÔå8¬¯Îƒù`9òË'%ğ¶‰‹~M¤$j°‚ä‹Úæ‡"ğe~zçbih¼ë½êA÷$ªÅuÄ¨Vä"ÉŒz_Â&È|ñ8®<ÄÑ¾ÇIšå¿q95‘O’‹ıæa®ˆé –ùaëxÉ[­øe³ú’dÑ4P’Š.;´í4‚cƒôÁ0B×ÌÍ0bX0RÇA6«C‰+‘¥íz—P/Ú#Î6Œ°xS)fJ³”®U=hy”V™«3VèMŞ´ B@ñÕC…OÒfö,fSîC[¤@ÌªD¤$a*½AIÕ`1:Z¦Eä'YêÆ0³A'j‚Î&¦^#Gg3IİÛ¸)­V-E˜ûnäÀ]ò«fƒ£’ÏæĞS‡º«î ~yA‰ss¯%XNeÛÑèãYÎ?Óâa®×·}§›Ù@ë<ô³H¸T;;ô%~Æ¹×êVÊE¸}Ì­Ñ*h”ú0íFHçY„Ğ¶ÚÙœšX œ»%BĞ#Ï¦¦¦ğ©ëªÒLMÄ%DÅ{Wµ%De§*DwÛÍ`*^ÌI—­yFKĞ™Ğ|VÙ«kÑÔÈ†êèyN£
++î@xzĞ£ ºYåqj!MM§s”õ	à×ËâOÓ<Ÿ	îašÏSOh ÎíPRUŠJägn$¼—uq¯Ç>nâ£‹Í¾Êã")W+Rdæ"ƒÅñZuj(§áîp(¯½Áp(¸-Cë/6MÀ<;ëÌûXA¬Úp5À5ª]w5it9îıêwS}RGÆcyÚOÍ¦j£¡Ïf1¨¹ñ!7sp³Ê ´ß¶AËü'fv° ³şâ<™;@
++Sá‚ÔNÍîÊæÜ#<)gÚŒÙ÷4ZQöCøŞëIÒ¬64Ç¢B™§j®§Å!)Ó;¹Pb:Úh×*uíx;ì¢İƒ‚Ño*ÂÄbèI»©™YQ¯@c~œfğcóg‚ö½33e\&_l!ôçÁLcõHt/?·Z¯ E˜0ÿ
++ÕËÖ²1#ë©7ƒõŠ#ñ#¯8Ô–ĞŞÃ¤aQşÉÜ÷ß[ ¡kptüŞ;uÃØï"zCUG€à²Ô/9ŒlYÈNÊÆéPß§ßà.´ï%îVÒÔ‹
++ªR«ìÕ¤`Jªy#Òh÷·Ë¡€Í¬¥J™¸·P¤ëÄº©cŠğÂ	¯¯–Äf‘=æ¯/ß>Ş0#¼	Ÿ_0y_^<®¢9ú®ÄL¯Bu ü*Êb/›ªÔãGˆi¨‹ZUÊOiˆ&h}…-]ş+U‚ı0u– ¶ä8ÎøUyå³ZµÔNİ^êy2½İ0	­" áÇ÷ZÌ À
++±xGe¦ä’:økO€ÂÇcEµFÚôÊ"òº	¢IIôl'¯®§$Q¸ñ+®¸Ñ5µw«”]õNÉ¼PŞ=ñf¥‡g¨”(«-Úd’àæzøÄˆÂLwËhÕàm¯óË¹g”iyB÷¤q-í‘"í;uc=L•Š·9Ú¢–ÒD"b;N]Œ»RŒÃ"9Q¿ÖÀ§ùÜ×›'yöZİ	ú6äó´/4êªîÔ¶)FJ¯cgÆî"R¥®ú=×ËËD8Ox„ZÓK±³öà¤øÆMEÇâƒºF‰'Á´´›·<MQy·Šßµ!ğYñÓæîe€WÜ;.Èënb©…gˆæ(Ïó¥*†/©uÕğ¤Ô‚ñ,C«iî»‰ª“\Ê,ÛíÏıe¢Ş­¡»@,iÇĞ¥ë±ï¦[b½Ñæ +Ú™Ök[~FÏ»mì(}56Š3gÆ^fàQø|+}æøÑÍÔÏ®1İ&ï“5ä_O‘ŸÄÿA~"Ğïèqæ&¿Í±GáæÁX`Ë³NI¥$õ%Ò8Y\‚Ñ(Ù÷P…Tv½¦)«PXhœ6oS—øÒÕ(ä(Fùc|bZü9@ûİâ!â§o–X³Ğvh\-Ü½ÎÂë/ÿş—7?¿|÷À÷óuÃÕ¯tÿ*wÜt—wEs¢Rp#ëÍT:‹İhIøB·®çgl\ÕG>wkúê:e]W§Á½ö6ˆĞ!Ú[û¾¯Z”ò5¡Ïúøz×/]ÃÎ§ãÌ;?Q¡ö…ì)BF¹›™ ¨«S¨ Îªı~5Î2'C°áb°óŞ“#û±ª‰0¯Õ´&İß9ÜÙ×9(3ÃD-ÌÀ¾Ù$©û¶Eüác*y!,‹Bq˜»œukİ}ãoÆUöûù¯CtÀéz€ñ	Íç‰.•+õÒUênĞùÇLâVèYÔhuØ_40OQì( á€ÌEõoSËD¤ê›õÉë}ôòêâŸø÷?DÅ¢9endstream
+ endobj
+ 15 0 obj
+-3591
++3694
+ endobj
+ 19 0 obj
+ <</Length 20 0 R/Filter /FlateDecode>>
+ stream
+-xœ½YÛrÛÈ}×WL9U	X%1¸ÃN¥"kµZnÉ©¸\R@`HbE 4.¢™ÚO°?$™33¸–/I¼)•$RìééËéÓİĞ;bPFñÕüÒ“éGÖå‰A.ñ½>ywÂ¤ i~E)y¹€/ş°X¨sŒx&ñl›,ÒæÔtÉbr§]Ş¾z}¯±û	¹-y1ÑMÇ ó´ó<MÃ,.I'0ùÇâg¨µP§[PÃhÒÖõvGôd²øBÌh¤,¡Í0a 5^m˜hµ°€z,šÏõ˜üi¤ øÀ.
+-w¶\É´êÌp¨s˜O¥Awš ZÕ?%1ÇË²Ş†'p‰T‘ÛŠdŸTRE»¸NwdÉWyÁINpià;¶ö˜dëç#¿áswÑ÷rú×Î½ :ÑKƒèûq ƒÂ@(¥ãPxõ` )åò‚$+rÈk²	… 9dØ.e¾Á”:ƒZ2ƒœ¤BÊ"înk£Ê°Nµ	3b’ó×·å±Oºm QPÙŞııB–%¯ˆáâoˆ ì°¯Ê´\jÚƒT:=d+p…¼‹P@M ÓVÜiÅ¡Ú .¤ÊIœ”/Ì†ØËWÓ¡†áYÚÇ$ãc`é&ªÒÔ¿/¼ÆåSó88ò´I¥«C˜S×í.y±îZ-t4i`‘?nB"ì^rxÛàš€²şš¯Új~’Ed±AÈÜÿ¤ò³uÁwÏG}çú¾S(ÆUæV,[ãĞ9ø½n ĞiöÏ°Fè-8Ú"ş–Gİ®tuNµÉ×
+-´M™5¨oí=€Ö¶:ĞjŸV…ô¼ó_Õ½÷¥®8I’õøşÅ7}E¦1Ÿ0›éiÓ²Š“Œèé8¦²;t
+-BºœØ†F#OßBíh‹-Ops©ãŒØµ.EÕ“ş0H€k×½Ù¥>‘Õğ´ú£¼UfÃ4©×§)\Â§»L}ŞÜx§¥@"ËùØSËAÁ%;şdi†fÏ/¢ai›ÑÚ&ÍcâÚö(a¶MmçsW´¡²Í¡%¿«®è=Şpò¡(+R%)è1ÛFş3Ç†ø÷n)_1>¶#=¿ÏzŸ\jõç%6ëÑ¦7L´ Ë±æQXôÕè¸$Iæ,ü¬‹éØA{@²ÿc	¸>õ‚á¨å;¼™XÍP•|¾	‹‡ßz°jÈbZ—Å´\&ÙtŸ€‚}Q„¾ÆKa‚ê[úCcIç¥!Ê2ØĞÍ`0ÀLcÆ__¢—ğò”<L˜¡ú:ç;Á¿ÔÔ@wšãEÁ#UB÷½&ÜO~û™ò\üY#æ#Uà&¯W%šLœã9ÙrÙêdÃÜpØ¶*ò´ÄFŒ…ùFÒŞS±_)¸_{ñ¹mÁ==46\ \lK,jçlÀÅõûDzÛğLÇ
+-ŠğeaÚMŒ¬÷AL"––áQ65_ŞöÜ0ÚÊ¾œ§´†İ†“AVê×)spfy(+‚yÆEñ¢¨wIÃÉòŠ,>¼®0{J<
+-kÉ6YaqíÊ¢P	÷‹ZNkH™7³‹^–axÚ…Qƒy;@şºÂØæ ¿{]1SÍ	¾["ø­†Z:åù@t1¥X•$,ŠDİF—´oİPÂ*R3¸h,rÌ“yÁTeY-AKP@öı®àe™äÙı„’™dsG ¢•S±ï÷Jp[HJåY<ˆs¹ÉëmLâ\ŞXIô 	SgF½ÁF*v£fáFêB²”+fàZZ]"U¼ÚKï]‹v{?8ÍŞõpJ.E%‰¼Æb‚YUú_a´ì¶Gµın0Ëèö!w|‚ñ°oGw*ğ¦
+-‹ªŞ‘ı&ÁĞ™T$)ákR%á6ù'ÂJ'ºğ;ÌÕ|–†2‰¾c9àSe! Ø!Àğø£Ì/ÃÎ›‚ œ@«å»"_†Ë­‚l(ßnyŠ«ñ2Œª$â´Å†?­¯!{Õ–éZ^ãúâ§ë›OªË³\«#«7ERUX–r]÷xšó; i‡yĞ·ËP?%Ñña›Ñv^:ü¹îbŠ3Yß”é¾k"a)@\ååqİÓ¶·nÎùxÀ’Ú™x§mªj÷|Š™8\­&Ìú#­SØ({!s˜ÆSÁÓÓQd.†–n½]¡¤â	@’áeV¨œv§"¢ß£Ñ=Š›x!ŠªÉóÁ½ş°6ÈÉváš‹H¡w¹xÎ„¦*ôØôJAø|:h˜O¦ıüúõÛ›ÙåO‹ãK™fv>ÇĞÕ†øP$ëMEşEL¼%·Ùˆ|Ñåû;™TÁ­o&¾Ñçí	c™å+íÕìüâj~ñ9kdÛQó
+-øÏJŒQuƒĞD¸ÏÀŸøÕ|rJş>a½uÙ„Ó7hXˆ>k„İO^ÈAmk¨Kñ0¹&—[âÙ‘ç´ôã2WeÄAu¨Æ(OuÉn­à°´µİ6	³ˆ7ÔzóB¤L5ä¶ëÛ|¸±B¢oöuzTÅƒ	á^Va"H4RSt[£ÆÑìwÈÅÆ¥­ªA‡WtÅÚ[î“6šèUæÑĞ×TÑ~¿Ÿ¸Âp›i4”Á§y³ÎÛ®¶n•¢rÚ¤UGš0z}Ú=«Ûc`‰Áğ]i8ŒîÀ4(ªIQ»'¤Ç I{]eïó‰å1TU áÀ9Ú¦İÑÉº“7j
+-‘Úƒ× ÌSŒ+4Ñxfj!Š9NJt­¦&ùhm€ HêKØJÃìhS*PMÅíº'ÃÊİ Xê”dAÍÉlşŒ¼œX¶ZÎæ³ù)y3;ß.PFâæaß±œ^‘ÂáÙÍÍÙÕbv1'×7äüúê‡Ùbv}…w?’³«·ä/³«N	úxû¼D3:‘I}³ßÛùû§ëÙ v ò#G"öûYá±Ä°g‰ÇYA/«ÌÅJ¥x_îx”|ˆÍl]²[çGfI/™ùÑŠL4;^¤‰œVJIºÛ$M*ÉÁ¥J—0pÁLë¸.Ç¥ø_\³Wóë'â4ÚÌ×÷bë;%r¡jŠ@-Tò§êaW»iµÒ8[¡ŸóFo?æ’ïÛ“X¥|ûØwø¯‡'-$´c„,şB'”óù½faÈm8–Xò 
+-1Î«á[t@[r
+-XÇ7Ú¶ısÉF!?±1Ìwƒ-ñ§‹ÅÉßğõo¶”ƒ…endstream
++xœÕYën·ş¯§  ]^Š\î5)Š6Fá¦hOR[FPØı±Ú¥¤­´—îr­è à>ÈyË3$÷.;IÏq
++†/’¸äÌ|3ß|Cÿ¦ˆÈ¯æw”Î—ÚT3‚.à{3ûcFÕÔüŠRôr	‹|ùÆr=ÓÏQäYÈ³m´LgÔ%ØrÑò0»1.®zskĞÛ9º®x97-‡`B=ã<OÓ0‹+Ô-˜ÿ¶üqf»Øg„"“Áó1œ¯6¹56õ¾@f„sJŒ¼ÜU(ÉP˜©g,ì e4óáP?ğÁxĞ8óåïòùhFåınRğ}’qÂóÅ9¯P–£8!ì'xY”\„"É30_\“¦ëa—2©•i†ˆŠ¸NÁªD/¥¤YkØnäbKÇ;Ñ {r#ı¹y@æäq8À÷	m`ŒåçƒmH³àı¦svnŞl¢õÍdkfcßíÎ.¢°¸ßs½¦EÓ¤à©'ı´Ô¢¼DÉómC¹Ò„DQ¦ R´3“`&‘2î8Jû¸ØéNkÌKÄ6Ìu†Ê:Cm!Â8ÏPœ¬ç–c¬yÉ3Îß\W
++æ6Á<»5R„Õ®âBºl¡Gq	™iıc‘±¨gõ	ØTE]AË(¡gäŒ¢*—ï gZvm0DJ××y®bqå&%MÑu[[P¯U˜ªB	Wùx'8Á|Õcî2m6˜×¥w®`½€u+“l£AODÅ÷ki$8.ê’?Ÿ"Î½oo¢f„)ÆL²Ë§c¼F_L1¶aA·Ác{£|ñMçûp[Î‡ËÌ²1ĞÉÁ æûªb¯ªz
++ù}yõfX˜×7¾ûZs«uU¨‚ÕácÛ§‰#{Z—Æ–CzÀYBb'Õîù„ş¨ocâ>uøã“: Á 8È¬aèì>tg“¸Å@7<C÷{ÈztHÄ¶+‰_Ë¬„ğÁ¡ïØÆ$ä4óØgpú}ÏQ%2‘Yd¦ P”ã0 &‡¡ğ`–ÏÂÕªÖ<Nˆ)?]häòÇãzÂ¡”Å "í”Î Úø4XA[»w|@áR]Øúƒ£<Š­ä¯¦^^è4æ^.éÊÕcÆŸ 9N(Í½ÂœÒ¦åckú ¡AxÜ¾7¾è;WÛİ+¯''v¿rxÚà˜Qş¨­Ö	Š€6*÷¯T~¶)y1a¶§®ïÅpÔÚuà3Ûà°ç+™¿¯›èvö °Iö–M:Ú2ştgWº&NµÉ7:i)Ô·ñ’Öf]Ò§U¡<ïü×uï}(¤ªë€„È|ÿ]±„“´êEÌçĞ»‚ÀòŒ»E%bÌtSÕºB¼šÛÄÀïN¨¦”i«EÄŒ3aW­Z¤I_ p¡™»½Ù•9WsñŒúOuªBÃ²°×Ãn¦MÖ¥úóæÄ#İİ‰4.çSOe,³ÍÃzÔƒšéøáE4,m«×œÛ4‘kÛÓaÆî‡™“#ÚPÙÖĞ’gbtDï1¨Œû²‘€²Ì³ıq*2–?uKùˆÄx4l£}¾Ì†—õÏ«Ü¬'GXŞh™,c­QXÌõtP‘$Iİ‰…º˜JØdÿÏp}=vRËÿ4vx;g¨JJ~µËİçVY,êª\T«$[ `_¡oğJš û–¹k,é¼ôADæŸ#ÈpÔùù%ô^¡İœİ×9/$ü^Ë¤†ìNsø£ä‘œ[aï[C>p;ÿüšò\¾m¾U?óÉVîh¢‘M&NÊ©´\:¤:Õ0·l[—yÚ
++±	c¾Q´÷¿TìG
++î}O"¾$ÒÜÃòp°c`ë›š6+€‹m•‹Æ9p1Îò o¾©ÀtFC¿_ƒq«iïƒTjT%¦C©ùòºç„AĞVöÅÕ …€»'…µZª¿Î`¬Î¬•à)¤`5ƒ|Y0]‡G”å­JîPóv¾Vù(­EûdU†åQµ+†¹%¸0ÌœÖ*7«E!Ë@;a´“Ÿƒä§v#V¤m––"¢+”}dxk@—Ìô•³ö\«uˆèû µ_ ›L²\T(,Ëd<Ã‚'†Ÿ:°„"Ò’\ö¥úL ²kùZå¬}WÀ¼[©‹>Œ^)rwd’Œ®.¤wP]ˆ*åY<{µÍë=Ìé¹:Q”I´Ãú>% å7På¨ähßÉ­ÔÄ){z]r\£P'W›gèB–‘5.! !ĞªŠÃÄ×rÏ!Ñfä¡f#İ0Ô ÚpĞ‹T¸Át–¢.Ğa›€àLJä…j"’pŸüb¨ü ²l˜Û‚àøÍ•îr«Ó°¡A; vÕ&şš[x2ŒN€_…1øn5®ÖêÔ¢ÌWáj¯8T/÷<•·»EF"‰8nSÃ±ıªmÈ¥ß*ÍrY{ë¶üáõåI­yÌeu½-!`\XÑ9L¾cmç³ş^ùª? é›g(?CÑøaˆC«ßÖİ£ é,Ú·h|èZJXÉy†y\kÏ¡è49·n^ñ© €‘µ3ñÆØ
++Q<_,À”¾ç^wÌ÷?l¹PfÃÊ¶ 7Éâ‹I¤ üî y³¨®ô’şLÕy;q!© ŞÍ©cğRÖXƒ u€sG÷6M&eE¸á2rP“E.ÿ) -WeÔ]'øõNÂé›Q™¿Ãƒú`.œ¿~óëå«‹–cÜÕšF^Ÿƒ.kã~,“ÍV ÿ ^¢ëlBHé’à×U"’~ßÎ}ÒƒÙ€9rÜrƒÆDå"0©ÊHXŸ´¹òc)CÔ'6ô“îF‚É·¾_Î~¯ÿ0oñendstream
+ endobj
+ 20 0 obj
+-2424
++2178
++endobj
++24 0 obj
++<</Length 25 0 R/Filter /FlateDecode>>
++stream
++xœuTÛnÛF}çWüÒ% ®¸¼ˆdû¤8ª«DR“nX}X“k™x1¹¬âHÿ9³Ë¥l( göì™3gæ\ÊÀU?óÌ+k~Á¡·\¸ÁÿÁz¶˜N óÈ+x—aR¬>dÖxAäAU[¸Ô[@v²îÉÍİæÓ°½w½èlÇ]ê²ˆ\7UÅë¢‡s‚ıwöa„¥I¨}ÄØXd³¾^mÓ•ıË›K1ä0²Âré‚é»È¦ÌEİ‹†ºÈ'Ë–çø0‘üegÿX,\ĞÄCÎæt82]_65xÔ…=Q‡¯Ì±«½ı¼4TüêFÂĞD/{ø~ lĞ$ò-­„²†¼©]c®š¨jší±äu.àTÊ'MÒ\C7‡a²%W #Gò¥Q!†:‚,ILh¨TÈÕz±ËL ©6’#|Ú7 ØœèpO^{B¥f¬‘<u…k"¯KÍÑs}ê1¬*¦‹äIÊö×ùüt:ÙE<`„r­=m:›EêÓ‚æÇ¨Ÿ›:¨¶QÊ}Ås©ÄZ«»ú(ú:ñ<”vöáx‹æü¥?ò±¬8H´ >šx¢}ONXXĞ8IÇßÒEûSû}uVµÿĞ	¼@6ª§®”e}˜Aß<Ê“ }/a„wŠ²—]ù`³dlú /7)…æ0™g'„4J&'x4˜îÕ è;^ÃÕ2…uzïlEL¼ˆ,Óu:ƒÏëìİ]Ÿ5‹4d¦ 4Jµ¼½]n³õ*…İ-\ï¶ï×Ùz·Å·ßa¹ı×Û÷3è9œBÕDÔJÛÁ™ğ5"¾-• £°s“VAb†ºíTWšÊ
++›!
++j;aà(ù$âBˆÇf¦oE^~Ï±gõaà‡ffâá…èOsùWü?‡H—ÛÕØ hEW•½šÛ,àXV¥äR¿ë¦Œ~ĞĞ?MáÏƒw±x½^ŒIºZÁr“î^Ó.7Ğ=‘y[U»'ñŞá`¿Z^ôO¼ûª÷ÛêbêºQLÄ”geÇsarğõ¿ÆfjIâñÓtR6c>HŞí…|»1Ï;ÑÇQ8Ï]\òe¸‰üóJis€şŞ6ÅO£OCpBÜ\£n†cçTÍ.™ØÈ‡×%V£#ADY2Eõi•Yâï|¬Åendstream
++endobj
++25 0 obj
++893
+ endobj
+ 4 0 obj
+ <</Type/Page/MediaBox [0 0 612 792]
+@@ -96,17 +99,28 @@
+ /Contents 19 0 R
+ >>
+ endobj
++23 0 obj
++<</Type/Page/MediaBox [0 0 612 792]
++/Rotate 0/Parent 3 0 R
++/Resources<</ProcSet[/PDF /Text]
++/ExtGState 26 0 R
++/Font 27 0 R
++>>
++/Contents 24 0 R
++>>
++endobj
+ 3 0 obj
+ << /Type /Pages /Kids [
+ 4 0 R
+ 13 0 R
+ 18 0 R
+-] /Count 3
+-/Rotate 0>>
++23 0 R
++] /Count 4
++>>
+ endobj
+ 1 0 obj
+ <</Type /Catalog /Pages 3 0 R
+-/Metadata 26 0 R
++/Metadata 31 0 R
+ >>
+ endobj
+ 7 0 obj
+@@ -117,69 +131,80 @@
+ 7 0 R>>
+ endobj
+ 12 0 obj
+-<</R10
++<</R8
++8 0 R/R10
+ 10 0 R/R9
+-9 0 R/R8
+-8 0 R>>
++9 0 R>>
+ endobj
+ 16 0 obj
+ <</R7
+ 7 0 R>>
+ endobj
+ 17 0 obj
+-<</R10
++<</R8
++8 0 R/R10
+ 10 0 R/R9
+-9 0 R/R8
+-8 0 R>>
++9 0 R>>
+ endobj
+ 21 0 obj
+ <</R7
+ 7 0 R>>
+ endobj
+ 22 0 obj
+-<</R10
++<</R8
++8 0 R/R10
+ 10 0 R/R9
+-9 0 R/R8
+-8 0 R>>
++9 0 R>>
++endobj
++26 0 obj
++<</R7
++7 0 R>>
++endobj
++27 0 obj
++<</R8
++8 0 R/R9
++9 0 R>>
++endobj
++8 0 obj
++<</BaseFont/Times-Roman/Type/Font
++/Encoding 28 0 R/Subtype/Type1>>
++endobj
++28 0 obj
++<</Type/Encoding/Differences[
++140/fi/fl
++169/copyright
++173/minus]>>
+ endobj
+ 10 0 obj
+ <</BaseFont/Times-Italic/Type/Font
+-/Encoding 23 0 R/Subtype/Type1>>
++/Encoding 29 0 R/Subtype/Type1>>
+ endobj
+-23 0 obj
++29 0 obj
+ <</Type/Encoding/Differences[
+ 140/fi]>>
+ endobj
+ 9 0 obj
+ <</BaseFont/Times-Bold/Type/Font
+-/Encoding 24 0 R/Subtype/Type1>>
++/Encoding 30 0 R/Subtype/Type1>>
+ endobj
+-24 0 obj
++30 0 obj
+ <</Type/Encoding/Differences[
+ 140/fi/fl
+ 173/minus]>>
+ endobj
+-8 0 obj
+-<</BaseFont/Times-Roman/Type/Font
+-/Encoding 25 0 R/Subtype/Type1>>
+-endobj
+-25 0 obj
+-<</Type/Encoding/Differences[
+-140/fi/fl
+-169/copyright
+-173/minus]>>
+-endobj
+-26 0 obj
++31 0 obj
+ <</Type/Metadata
+-/Subtype/XML/Length 1291>>stream
++/Subtype/XML/Length 1321>>stream
+ <?xpacket begin='ï»¿' id='W5M0MpCehiHzreSzNTczkc9d'?>
+ <?adobe-xap-filters esc="CRLF"?>
+ <x:xmpmeta xmlns:x='adobe:ns:meta/' x:xmptk='XMP toolkit 2.9.1-13, framework 1.6'>
+ <rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#' xmlns:iX='http://ns.adobe.com/iX/1.0/'>
+-<rdf:Description rdf:about='9f72c3f1-2a25-11e8-0000-763174791274' xmlns:pdf='http://ns.adobe.com/pdf/1.3/' pdf:Producer='GPL Ghostscript 8.61'/>
+-<rdf:Description rdf:about='9f72c3f1-2a25-11e8-0000-763174791274' xmlns:xap='http://ns.adobe.com/xap/1.0/' xap:ModifyDate='2008-03-14T13:56:10-07:00' xap:CreateDate='2008-03-14T13:56:10-07:00'><xap:CreatorTool>groff version 1.18.1.4</xap:CreatorTool></rdf:Description>
+-<rdf:Description rdf:about='9f72c3f1-2a25-11e8-0000-763174791274' xmlns:xapMM='http://ns.adobe.com/xap/1.0/mm/' xapMM:DocumentID='9f72c3f1-2a25-11e8-0000-763174791274'/>
+-<rdf:Description rdf:about='9f72c3f1-2a25-11e8-0000-763174791274' xmlns:dc='http://purl.org/dc/elements/1.1/' dc:format='application/pdf'><dc:title><rdf:Alt><rdf:li xml:lang='x-default'>Untitled</rdf:li></rdf:Alt></dc:title></rdf:Description>
++<rdf:Description rdf:about='242789b4-7744-11eb-0000-553a08dd8a28' xmlns:pdf='http://ns.adobe.com/pdf/1.3/' pdf:Producer='GPL Ghostscript 8.71'/>
++<rdf:Description rdf:about='242789b4-7744-11eb-0000-553a08dd8a28' xmlns:xmp='http://ns.adobe.com/xap/1.0/'><xmp:ModifyDate>2011-02-23T09:33:30+01:00</xmp:ModifyDate>
++<xmp:CreateDate>2011-02-23T09:33:30+01:00</xmp:CreateDate>
++<xmp:CreatorTool>groff version 1.20.1</xmp:CreatorTool></rdf:Description>
++<rdf:Description rdf:about='242789b4-7744-11eb-0000-553a08dd8a28' xmlns:xapMM='http://ns.adobe.com/xap/1.0/mm/' xapMM:DocumentID='242789b4-7744-11eb-0000-553a08dd8a28'/>
++<rdf:Description rdf:about='242789b4-7744-11eb-0000-553a08dd8a28' xmlns:dc='http://purl.org/dc/elements/1.1/' dc:format='application/pdf'><dc:title><rdf:Alt><rdf:li xml:lang='x-default'>Untitled</rdf:li></rdf:Alt></dc:title></rdf:Description>
+ </rdf:RDF>
+ </x:xmpmeta>
+                                                                         
+@@ -188,43 +213,48 @@
+ endstream
+ endobj
+ 2 0 obj
+-<</Producer(GPL Ghostscript 8.61)
+-/CreationDate(D:20080314135610-07'00')
+-/ModDate(D:20080314135610-07'00')
+-/Creator(groff version 1.18.1.4)>>endobj
++<</Producer(GPL Ghostscript 8.71)
++/CreationDate(D:20110223093330+01'00')
++/ModDate(D:20110223093330+01'00')
++/Creator(groff version 1.20.1)>>endobj
+ xref
+-0 27
++0 32
+ 0000000000 65535 f 
+-0000010989 00000 n 
+-0000013158 00000 n 
+-0000010907 00000 n 
+-0000010423 00000 n 
++0000011963 00000 n 
++0000014231 00000 n 
++0000011883 00000 n 
++0000011237 00000 n 
+ 0000000015 00000 n 
+-0000004202 00000 n 
+-0000011054 00000 n 
+-0000011625 00000 n 
+-0000011475 00000 n 
+-0000011335 00000 n 
+-0000011095 00000 n 
+-0000011125 00000 n 
+-0000010583 00000 n 
+-0000004222 00000 n 
+-0000007885 00000 n 
+-0000011175 00000 n 
+-0000011205 00000 n 
+-0000010745 00000 n 
+-0000007906 00000 n 
+-0000010402 00000 n 
+-0000011255 00000 n 
+-0000011285 00000 n 
+-0000011419 00000 n 
+-0000011556 00000 n 
+-0000011707 00000 n 
+-0000011790 00000 n 
++0000004174 00000 n 
++0000012028 00000 n 
++0000012378 00000 n 
++0000012683 00000 n 
++0000012543 00000 n 
++0000012069 00000 n 
++0000012099 00000 n 
++0000011397 00000 n 
++0000004194 00000 n 
++0000007960 00000 n 
++0000012149 00000 n 
++0000012179 00000 n 
++0000011559 00000 n 
++0000007981 00000 n 
++0000010231 00000 n 
++0000012229 00000 n 
++0000012259 00000 n 
++0000011721 00000 n 
++0000010252 00000 n 
++0000011217 00000 n 
++0000012309 00000 n 
++0000012339 00000 n 
++0000012460 00000 n 
++0000012627 00000 n 
++0000012764 00000 n 
++0000012833 00000 n 
+ trailer
+-<< /Size 27 /Root 1 0 R /Info 2 0 R
+-/ID [<59B784D8767F4325886144F7BBBEC3D8><59B784D8767F4325886144F7BBBEC3D8>]
++<< /Size 32 /Root 1 0 R /Info 2 0 R
++/ID [<696982BCF1C204FFE789F9A68151A0E8><696982BCF1C204FFE789F9A68151A0E8>]
+ >>
+ startxref
+-13314
++14385
+ %%EOF

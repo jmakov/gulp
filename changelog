@@ -1,0 +1,22 @@
+Version 1.58, published Mar 18, 2008
+ - if packets are dropped, emit system tuning suggestion
+ - fix Makefile so check64bit runs even if user doesn't have . in $PATH
+
+Version 1.57, published Feb 20, 2008
+ - added capture-to-file options: -o, -C, -W (see updated manpage)
+ - added explanation about 64 bit interoperability problems to documentation
+   and explained the preferred solution, see:
+   http://staff.washington.edu/corey/gulp/gulp.html#64bit
+ - added test in Gulp's Makefile: if 64 bit linux issue warning and URL above
+ - added conditional code of last resort to try to generate (though not read)
+   32-bit capture files with the 64-bit pcap library (a last resort)
+ - made -s # refer to decapsulated snaplen if -d is also specified.  Made file
+   header agree with decapsulated length too (although I don't know of
+   anything which breaks if the snaplen in the file header is incorrect).
+ - added information about using taskset(1) to writeup and manpage (for even
+   better performance in a pipeline if more than 2 CPUs are available).
+ - fixed ifdef JUSTCOPY (which was slightly broken in 1.49).
+ - improved diagnostics if argument to -V begins with - (probable mistake)
+
+Version 1.49, published Aug 9, 2007
+ - initial public release

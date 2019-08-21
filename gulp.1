@@ -1,0 +1,269 @@
+.TH GULP "1" "Jun 2007" "Gulp 1.0" "User Commands"
+.SH NAME
+gulp \- drink efficiently from the network firehose
+.SH SYNOPSIS
+.B gulp
+[\fB--help\fR | \fIOPTIONS\fR]
+.PD 0.55v
+.SH DESCRIPTION
+.PP
+On a system with at least two CPUs (or cores),
+.B Gulp
+will probably drop far fewer packets than \fBtcpdump\fR when capturing from
+ethernet and writing to disk, allowing for much higher packet capture rates.
+.B Gulp
+has the ability to read directly from the network but even piping output
+from legacy applications through \fBgulp\fP before writing to disk
+will probably result in a substantial performance improvement.
+.LP
+Since \fBGulp\fP uses CPUs #0-1,
+if you use \fBGulp\fP in a pipeline and have more than 2 CPUs,
+you can further improve performance by explicitly running
+other programs on CPUs #2-N with \fBtaskset\fP(1) as shown in some
+examples below.
+.LP
+To improve interactive response at low packet rates,
+.B Gulp
+will flush its ring buffer if it has not written anything
+in the last second.  If the data rate increases,
+Gulp will realign its writes to even
+block boundaries for optimum writing efficiency.
+.LP
+When
+.B Gulp
+receives an interrupt, it will stop filling its ring buffer but will
+not exit until it has finished writing whatever remains in the ring buffer.
+If the buffer is large this can take a while--be patient.
+.SH OPTIONS
+.TP
+\fB\-d\fR
+Decapsulates packets from a Cisco "Encapsulated Remote SPAN Port" (ERSPAN).
+Sets the pcap filter expression to "proto gre" and strips off Cisco
+GRE headers (50 bytes) from the packets captured.  (If used with "-f"
+note that arguments are processed left to right).
+.TP
+\fB\-f\fR
+Specify a pcap filter expression.  This may be useful to select one from
+many GRE streams (if using \fB\-d\fR), or if not using \fB\-d\fR, because
+filtering out packets in the kernel is more efficient than passing them
+first through \fBGulp\fR and then filtering them out.
+.TP
+\fB\-i \fIeth#\fR
+Specify the network interface to read from.  The default is \fBeth1\fR
+or the value of environment variable $CAP_IFACE, if present.  Specifying
+"\fB\-\fR" as an "interface" reads a pcap file from standard input instead.
+(If you forget -d during a live capture, you can decapsulate offline this
+way).
+.TP
+\fB\-r \fI#\fR
+Specify a ring buffer size (in megabytes).  Values from 1-1024 are permitted,
+the default is 100MB.  If possible, the ring buffer will be locked into RAM.
+.TP
+\fB\-c\fR
+Just copy and buffer bytes from stdin to stdout -- don't read packets
+from the network and don't assume anything about the format of the data.
+This may be useful to improve the real-time performance of another application.
+.TP
+\fB\-s \fI#\fR
+Packet capture snapshot length.  By default, complete packets are captured.
+For efficiency, captured packets can be truncated to a given length during the
+capture process, which reduces capture overhead and pcap file sizes.
+(If used with "-d", specifies length after decapsulation.)
+.TP
+\fB\-F\fR
+Skip default check that the capture interface is an Ethernet interface.
+.TP
+\fB\-x\fR
+Use file locking to request (via exclusive lock) that this be the only
+instance of \fBGulp\fR running.  If other instances are already running,
+they must be stopped before Gulp will start with this option.
+.TP
+\fB\-X\fR
+Override an exclusive lock (above) and run anyway.  An instance
+of \fBGulp\fR started this way will hold a shared lock if no exclusive
+locks were broken, otherwise it will hold no locks at all (causing a
+subsequent attempt to get an exclusive lock to succeed).
+.TP
+\fB\-v\fR
+Print program version and exit.
+.TP
+\fB\-V xxxxxxxxxx\fR
+If the string of Xs is wide enough (10 or more), it will be overwritten
+twice per second with a brief capture status update consisting of one
+digit followed by two percentages.  The digit is the number of decimal
+digits in the actual count of lost packets (0 indicates no drops).
+The two percentages are the current and
+maximum ring buffer utilization.  The updated argument string can be seen
+with the "\fBps\ \-x\fP" command (or equivalent).
+.sp 0.55v
+If the string of Xs is too short to hold the information above, a more verbose
+status line is written to standard error instead (also twice/second).  The
+first method is probably more useful to occasionally check on long
+captures and the second will be more convenient while experimenting and
+setting up a capture.
+.TP
+\fB\-p \fI#\fR
+Specify the thread polling interval (in microseconds).  The reader/writer
+threads poll at this interval when the ring buffer is full/empty waiting for
+that to change.  Polling (even frequently) on modern hardware consumes
+immeasurably few resources.  The default interval is 1000 (microseconds).
+.TP
+\fB\-q\fR
+Suppress warnings about the ring buffer being full.  (If input is not
+from a live capture, no data will be lost when the ring buffer fills
+so the warning can be safely suppressed.  (If stdin is actually a file,
+warning suppression will happen automatically.)
+.TP
+\fB\-z \fI#\fR
+Specify output write blocksize.  Any power of two between 4096 and 65536
+will probably be OK.  It seems to be slightly more efficient to write larger
+blocks so the default is 65536 for now.
+.SH CAPTURE TO FILE OPTIONS
+.TP
+\fB\-o \fIdir\fR
+Redirects pcap output into a collection of files in directory \fIdir\fP.
+Pcap files will be named \fBpcap\fI###\fR (where \fI###\fP starts at 000
+and counts up).  To prevent mischief, the directory must exist (and be
+writable by the user running Gulp if Gulp is running setuid).
+.TP
+\fB\-n \fIname\fR
+Specify a filename prefix of \fIname\fP instead of the default \fBpcap\fP.
+.TP
+\fB\-t\fR
+When set, the current timestamp will be appended after \fIname\fP. This
+option implicitely sets \fB\-z 1000\fP (and so always produces filenames
+like \fIname\fP1234567890.\fI###\fP).
+.TP
+\fB\-C \fI#\fR
+When using the -o option above, start a new pcap file when the old one
+reaches about # times the size of the ring buffer.  The default value is
+10 and the default ring buffer size is 100MB so by default, pcap files will
+grow to about 1000MB before a new one is started.  Since some programs
+read an entire pcap file into memory when using it, splitting the output
+into chunks can be helpful.
+.TP
+\fB\-G \fI#\fR
+If set, specifies the maximum delay (in seconds) after which a new output
+file is created (same behavior as the equivalent \fBtcpdump\fP option).
+.TP
+\fB\-W \fI#\fR
+Specifies a maximum number of pcap files to create before overwriting
+them.  The default is to never overwrite them.  This option allows capturing
+indefinitely (waiting for a problem to occur) with finite disk space.
+.TP
+\fB\-Z \fIpostrotate-command\fR
+If set, specifies a command to post-process each capture file after they got
+rotated.
+.SH OTHER OPTIONS
+.TP
+\fB\-B\fR
+This option is of academic interest only.  It enables code to
+check before each write whether select(2) thinks the
+write would block.  When \fBGulp\fP exits, it announces whether any
+writes would have blocked.  On linux, no matter how long writes to disk
+actually take, select(2) never says they will block.  If you pipe the output
+of \fBGulp\fP through cat before writing to disk, select \fIwill\fP detect
+writes to the pipe would block.
+.TP
+\fB\-Y\fR
+This option is of academic interest only.  Writes which would block
+are deferred until select(2) says they won't block.
+.SH EXAMPLES
+.LP
+In the examples below, the ellipsis (\fI...\fR) refers to Berkeley
+Packet Filter (pcap) expressions, such as "\fBhost foo\fB".
+.LP
+1) reduce packet loss of a tcpdump packet capture:
+.br
+\h'\w"1) "u'(gulp -c works in any pipeline as it does no data interpretation)
+.sp 0.55v
+	\fBtcpdump -i \fIeth1\fB -w - \fI...\fB | gulp -c > \fIpcapfile\fR
+.br
+\h'\w"1) "u'or if you have more than 2, run tcpdump and gulp on different CPUs
+.br
+	\fBtaskset -c 2 tcpdump -i \fIeth1\fB -w - \fI...\fB | gulp -c > \fIpcapfile\fR
+.sp 0.55v
+\h'\w"1) "u'(gulp uses CPUs #0,1 so use #2 for tcpdump to reduce interference)
+.LP
+2) same as above but more efficiently using gulp itself to capture:
+.sp 0.55v
+	\fBgulp -i \fIeth1\fB -f "\fI...\fB" > \fIpcapfile\fR
+.LP
+3) capture and decapsulate an ERSPAN feed and save the result to disk:
+.sp 0.55v
+	\fBgulp -i \fIeth1\fB -d > \fIpcapfile\fR
+.LP
+4) capture, decapsulate and then filter with tcpdump before saving:
+.sp 0.55v
+	\fBgulp -i \fIeth1\fB -d | tcpdump -r - -s0 -w \fIpcapfile ...\fR
+.br
+\h'\w"4) "u'or if you have more than 2 CPUs
+.br
+	\fBgulp -i \fIeth1\fB -d | taskset -c 2 tcpdump -r - -s0 -w \fIpcapfile ...\fR
+.LP
+5) capture everything to disk; then decapsulate offline:
+.sp 0.55v
+	\fBgulp -i \fIeth1\fB > \fIpcapfile1\fB;
+gulp -d -i - < \fIpcapfile1\fB > \fIpcapfile2\fR
+.LP
+6) capture, decapsulate and then filter with ngrep:
+.sp 0.55v
+	\fBgulp -i \fIeth1\fB -d | ngrep -I - -O \fIpcapfile regex ...\fR
+.LP
+7) capture, decapsulate and feed into ntop:
+.sp 0.55v
+	\fBgulp -i \fIeth1\fB -d | ntop -f /dev/stdin -m \fIa.b.c.d/x\fB ...\fR
+.br
+\h'\w"7) "u'or if using ntop's -u flag:
+.br
+	\fBmkfifo \fIpipe\fB; chmod 644 \fIpipe\fR	# the first time only
+.br
+	\fBgulp -i \fIeth1\fB -d > \fIpipe\fB & ntop -u \fIntop\fB -f \fIpipe\fB -m \fIa.b.c.d/x\fB ...\fR
+.LP
+8) capture, decapsulate and feed into WireShark:
+.sp 0.55v
+	\fBgulp -i \fIeth1\fB -d | /usr/sbin/wireshark -i - -k\fR
+.LP
+9) capture to 1000MB files, keeping just the most recent 10 (files):
+.sp 0.55v
+	\fBgulp -i \fIeth1\fB -C 10 -W 10 -o \fIpcapdir\fR
+.br
+\h'\w"9) "u'or with help from tcpdump:
+.br
+	\fBgulp -i \fIeth1\fB | taskset -c 2 tcpdump -r- -C 1000 -W 10 -w \fIpcapname\fR
+.SH BUGS
+.LP
+On some systems, one interrupt may not break out of the pcap
+library's inner packet capture loop (if no packets arrive matching the
+filter expression).  In that case, a second interrupt should do the trick.
+.LP
+On a busy network,
+Gulp may drop a few packets at startup while it is initializing.
+This makes Gulp look bad but is probably not a problem in practice.
+.SH AUTHOR
+Written by Corey Satten, corey \@ u.washington.edu
+.LP
+See \fBhttp://corey.elsewhere.org/gulp/\fP for more information and
+the latest version.
+.LP
+This manpage corresponds to Gulp version 1.58-crox.
+.SH COPYRIGHT
+Copyright \(co 2007 University of Washington
+.SH LICENSE
+.LP
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+.LP
+    http://www.apache.org/licenses/LICENSE-2.0
+.LP
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+.SH "SEE ALSO"
+.B tcpdump(8), wireshark(1), ngrep(8), tcptrace(1), tcpflow(1), ntop(8)
+.B taskset(1)
+and
+.B pcap(3).
