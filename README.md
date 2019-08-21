@@ -54,22 +54,44 @@ Usage: ./gulp [--help | options]
 Assuming we already applied changes for [running gulp without root](#Running-without-root) otherwise we'll need to call
 `sudo` before each command.
 
+### Including UTC timestamp in file names
 Save captured network traffic to a file with UTC timestamp in file name e.g. `my_filename_20190821100215.pcap`
 ```
-mkdir -p tmp
-bin/gulp -i enp111s0 -t -o tmp/ -n my_filename
+mkdir -p savedir
+bin/gulp -i eth0 -t -o savedir/ -n my_filename
 ```
- 
+### File rotation
 Create a new file when the old grows over 100MB:
 ```
-mkdir -p tmp
-bin/gulp -i enp111s0 -r 100 -C 1 -o tmp/ -n my_filename
+mkdir -p savedir
+bin/gulp -i eth0 -r 100 -C 1 -o savedir/ -n my_filename
 ```
 
 Create a new file when the old grows over 100MB and include UTC timestamp in newly created file names:
 ```
-mkdir -p tmp
-bin/gulp -i enp111s0 -r 100 -C 1 -o tmp/ -n my_filename -t
+mkdir -p savedir
+bin/gulp -i eth0 -r 100 -C 1 -o savedir/ -n my_filename -t
+```
+
+### Compress rotated files
+postrotate.sh
+```shell script
+#!/usr/bin/env bash
+
+# gulp sends file name as an argumen to this script
+IN_FN=$1
+TMP_FN=$IN_FN.tmp
+FIN_FN=$IN_FN.zst
+
+zstd -q -19 --rm $IN_FN -o $TMP_FN
+# signal with an atomic rename that the file is not being written to anymore
+mv $TMP_FN $FIN_FN
+```
+
+We start gulp with the `-Z` flag:
+```
+mkdir -p savedir
+bin/gulp -i eth0 -t -r 100 -C 1 -n my_pcap_file -o savedir -Z postrotate.sh
 ```
 
 ## Running without root
