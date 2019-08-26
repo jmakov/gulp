@@ -7,11 +7,12 @@ This repository is based on the latest patches from the original contributor (ht
 * rotate files using UTC timestamps for new file names
 * separate reading and writing thread for increased performance
 
-# TODO
-See [proposed enhancements](https://github.com/jmakov/gulp/issues?q=is%3Aissue+is%3Aopen+label%3Aenhancement).
-
 # Getting started
-## Dependencies
+## Installation
+From project root run `./scripts/install.sh` (root required)
+
+## Building manually
+### Dependencies
 * pcap.h
 * cmake
 
@@ -20,14 +21,12 @@ Quick dependencies install command for Ubuntu (tested on Ubuntu 19.04)
 sudo apt-get install libpcap-dev cmake
 ```
 
-## How to build
-Running
+Build:
 ```shell script
 mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release 
-cmake --build . -j8
+cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake --build .
 ```
-outputs `gulp` in `build/bin`.
 
 # Usage
 ```
@@ -67,19 +66,19 @@ Assuming we already applied changes for [running gulp without root](#Running-wit
 
 ### Including UTC timestamp in file names
 Save captured network traffic to a file with UTC timestamp in file name e.g. `my_filename_20190821100215.pcap`
-```
+```shell script
 mkdir -p savedir
 gulp -i eth0 -t -o savedir/ -n my_filename
 ```
 ### File rotation
 Create a new file when the old grows over 100MB:
-```
+```shell script
 mkdir -p savedir
 gulp -i eth0 -r 100 -C 1 -o savedir/ -n my_filename
 ```
 
 Create a new file when the old grows over 100MB and include UTC timestamp in newly created file names:
-```
+```shell script
 mkdir -p savedir
 gulp -i eth0 -r 100 -C 1 -o savedir/ -n my_filename -t
 ```
@@ -106,7 +105,14 @@ gulp -i eth0 -t -r 100 -C 1 -n my_pcap_file -o savedir -Z postrotate.sh
 ```
 
 ## Running without root
-`sudo setcap cap_ipc_lock,cap_sys_nice,cap_net_raw,cap_net_admin=eip gulp`
+```shell script
+sudo groupadd pcap
+sudo usermod -a -G pcap $USER
+sudo mkdir -p /opt/gulp/bin
+sudo cp build/bin/gulp /opt/gulp/bin
+sudo chgrp pcap /opt/gulp/bin/gulp
+sudo setcap cap_ipc_lock,cap_sys_nice,cap_net_raw,cap_net_admin=eip /opt/gulp/bin/gulp
+```
 
 Short explanation why we need these capabilities:
 * `cap_ipc_lock` is required because we're calling `mlock` which guarantees us that the buffer in RAM will stay in RAM
