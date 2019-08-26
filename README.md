@@ -23,7 +23,7 @@ sudo apt-get install libpcap-dev cmake
 
 Build:
 ```shell script
-mkdir build && cd build
+mkdir cmake-build-release && cd cmake-build-release
 cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build .
 ```
