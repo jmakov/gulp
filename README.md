@@ -131,8 +131,8 @@ Set the max OS send buffer size (wmem) and receive buffer size (rmem) to 12 MB f
 ```
 You also need to set minimum size, initial size, and maximum size in bytes:
 ```shell script
-# echo 'net.ipv4.tcp_rmem= 10240 87380 12582912' >> /etc/sysctl.conf
-# echo 'net.ipv4.tcp_wmem= 10240 87380 12582912' >> /etc/sysctl.conf
+# echo 'net.ipv4.tcp_rmem= 12582912 125829120 1258291200' >> /etc/sysctl.conf
+# echo 'net.ipv4.tcp_wmem= 12582912 125829120 1258291200' >> /etc/sysctl.conf
 ```
 Turn on window scaling which can be an option to enlarge the transfer window:
 ```shell script
