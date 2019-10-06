@@ -21,7 +21,7 @@ sudo cp -rf bin/gulp /opt/gulp/bin
 sudo chgrp pcap /opt/gulp/bin/gulp
 sudo setcap cap_ipc_lock,cap_sys_nice,cap_net_raw,cap_net_admin=eip /opt/gulp/bin/gulp
 
-read -p "Tune TCP settings in /etl/sYsctl.conf? [y/n]" -n 1 -r
+read -p "Tune TCP settings in /etl/sysctl.conf? [y/n]" -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
   echo "### Added by puma-ETL ###" $SYSCTL_APPEND_COMMAND
