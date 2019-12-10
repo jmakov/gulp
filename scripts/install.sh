@@ -28,7 +28,7 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
   echo "### Added by puma-ETL ###" | $SYSCTL_APPEND_COMMAND
   echo 'net.core.wmem_max=125829120' | $SYSCTL_APPEND_COMMAND
   echo 'net.core.rmem_max=125829120' | $SYSCTL_APPEND_COMMAND
-  echo 'net.core.rmem_default=12582912' | $SYSCTL_APPEND_COMMAND
+  echo 'net.core.rmem_default=125829120' | $SYSCTL_APPEND_COMMAND
   echo 'net.ipv4.tcp_rmem= 12582912 125829120 1258291200' | $SYSCTL_APPEND_COMMAND
   echo 'net.ipv4.tcp_wmem= 12582912 125829120 1258291200' | $SYSCTL_APPEND_COMMAND
   echo 'net.ipv4.tcp_window_scaling = 1' | $SYSCTL_APPEND_COMMAND
