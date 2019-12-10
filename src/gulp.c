@@ -487,21 +487,30 @@ child_cleanup(int signo)
 }
 
 void process_savefile(char filename[PATH_MAX]) {
-    if (fork())
-	return;
+    pid_t pid;
+
+    if ( ! (zflag && strlen(filename)) )
+        return;
+
+    pid = fork();
+    if ( pid == -1 ) {
+        fprintf(stderr, "process_savefile: fork(): %s\n", strerror(errno));
+        return;
+    } else if (pid > 0 ) {
+        /* parent process */
+        return;
+    }
+
     /* set to lowest priority */
 #ifdef NZERO
     setpriority(PRIO_PROCESS, 0, NZERO - 1);
 #else
     setpriority(PRIO_PROCESS, 0, 19);
 #endif
-    if (zflag) {
-        if(strlen(filename) > 0) {
-            if (execlp(zcmd, zcmd, filename, (char *)NULL) == -1) {
-                fprintf(stderr, "compress_savefile: execlp(%s, %s): %s\n", zcmd, filename, strerror(errno));
-            }
-	    }
-	}
+    execlp(zcmd, zcmd, filename, (char *)NULL);
+    /* exec*() return only on failure */
+	fprintf(stderr, "process_savefile: execlp(%s, %s): %s\n", zcmd, filename, strerror(errno));
+	exit(EXIT_FAILURE);
 }
 
 /*
@@ -561,11 +570,7 @@ int newoutfile(char *dir, int num) {
 	dup2(tmpfd, fileno(stdout));	/* try to use the initial fd */
 	close(tmpfd);
 	rename(tfile, ofile);
-	if (odir) {
-	    if (zflag) {
-		process_savefile(wfile);
-		}
-	    }
+	if (odir) process_savefile(wfile);
 	/* wfile = ofile; */
 	snprintf(wfile, sizeof(wfile), "%s", ofile);
 	return (1);
@@ -685,9 +690,7 @@ void *Writer(void *arg)
 	    }
 	pushed = push;
 	}
-    if (odir) {
-	process_savefile(wfile);
-	}
+    if (odir) process_savefile(wfile);
     pthread_exit(NULL);
     }
 
